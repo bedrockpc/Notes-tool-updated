@@ -12,8 +12,6 @@ from io import BytesIO
 import time
 
 # --- Configuration and Constants ---
-# (Keys, SYSTEM_PROMPT, and COLORS remain the same for brevity)
-# ... [Keeping original content for these sections] ...
 
 EXPECTED_KEYS = [
     "main_subject", "topic_breakdown", "key_vocabulary",
@@ -30,34 +28,37 @@ You are a master academic analyst creating a concise, hyperlinked study guide fr
 **Instructions:**
 1.  Analyze the entire transcript.
 2.  For every piece of information you extract, find the nearest timestamp that comes *before* it in the text. Convert that timestamp into **total seconds** (e.g., (01:30) becomes 90).
-3.  **Highlighting:** Inside any 'detail', 'definition', 'explanation', or 'insight' string, find the single most critical phrase (3-5 words) and wrap it in `<hl>` and `</hl>` tags. Do this only once per item where appropriate.
-4.  Be concise. Each point must be a short, clear sentence.
-5.  Extract the information for the following categories. **Only include a category in the final JSON if the user specifically requested it.**
+3.  Be concise. Each point must be a short, clear sentence.
+4.  Extract the information for the following categories. **Only include a category in the final JSON if the user specifically requested it.**
+5.  DO NOT use any special markdown or tags like <hl> in the final JSON content.
 
 The JSON structure must include these keys with objects/arrays:
 {
   "main_subject": "A short phrase identifying the main subject.",
-  "topic_breakdown": [{"topic": "Topic 1", "details": [{"detail": "This is a <hl>short detail</hl>.", "time": 120}]}],
-  "key_vocabulary": [{"term": "Term 1", "definition": "A <hl>short definition</hl>.", "time": 150}],
-  "formulas_and_principles": [{"formula_or_principle": "Principle 1", "explanation": "A <hl>brief explanation</hl>.", "time": 180}],
-  "teacher_insights": [{"insight": "<hl>Short insight</hl> 1.", "time": 210}],
-  "exam_focus_points": [{"point": "Brief <hl>focus point</hl> 1.", "time": 240}],
-  "common_mistakes_explained": [{"mistake": "Mistake 1", "explanation": "A <hl>short explanation</hl>.", "time": 270}],
-  "key_points": [{"point": "A major <hl>takeaway point</hl>.", "time": 300}],
-  "short_tricks": [{"trick": "A <hl>quick method</hl> to solve a problem.", "time": 330}],
-  "must_remembers": [{"fact": "A fact that <hl>must be memorized</hl>.", "time": 360}]
+  "topic_breakdown": [{"topic": "Topic 1", "details": [{"detail": "This is a short detail.", "time": 120}]}],
+  "key_vocabulary": [{"term": "Term 1", "definition": "A short definition.", "time": 150}],
+  "formulas_and_principles": [{"formula_or_principle": "Principle 1", "explanation": "A brief explanation.", "time": 180}],
+  "teacher_insights": [{"insight": "Short insight 1.", "time": 210}],
+  "exam_focus_points": [{"point": "Brief focus point 1.", "time": 240}],
+  "common_mistakes_explained": [{"mistake": "Mistake 1", "explanation": "A short explanation.", "time": 270}],
+  "key_points": [{"point": "A major takeaway point.", "time": 300}],
+  "short_tricks": [{"trick": "A quick method to solve a problem.", "time": 330}],
+  "must_remembers": [{"fact": "A fact that must be memorized.", "time": 360}]
 }
 """
 
+# 🎨 VIBRANT AND READABLE PALETTE 🎨
 COLORS = {
-    "title_bg": (40, 54, 85), "title_text": (255, 255, 255),
-    "heading_text": (40, 54, 85), "link_text": (0, 0, 255), 
-    "body_text": (30, 30, 30), "line": (220, 220, 220),
-    "highlight_bg": (255, 255, 0)
+    "title_bg": (65, 105, 225),   # Royal Blue (Vibrant Header)
+    "title_text": (255, 255, 255),  # White
+    "heading_text": (30, 30, 30),   # Near Black (High Contrast for Headings)
+    "link_text": (0, 150, 136),   # Bright Teal (Vibrant Link Color)
+    "body_text": (50, 50, 50),     # Dark Gray (Excellent Readability)
+    "line": (178, 207, 255),      # Light Blue (Subtle Separator Line)
 }
 
 # --------------------------------------------------------------------------
-# --- STREAMLIT UTILITY FUNCTIONS ---
+# --- STREAMLIT UTILITY FUNCTIONS (Simplified/Fixed) ---
 # --------------------------------------------------------------------------
 
 @st.cache_data
@@ -69,8 +70,9 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
     
     sections_to_process = ", ".join(sections_list)
     
+    # NOTE: Highlighting tags removed from prompt logic
     full_prompt = f"""
-    {SYSTEM_PROMPT}
+    {SYSTEM_PROMPT.replace("<hl>", "").replace("</hl>", "")}
 
     **USER CONSTRAINTS (from Streamlit app):**
     - Max Detail Length: {max_words} words (Limit the length of each detail/explanation string).
@@ -142,7 +144,7 @@ def inject_custom_css():
     )
     
 # --------------------------------------------------------------------------
-# --- ORIGINAL HELPER FUNCTIONS (Corrected) ---
+# --- ORIGINAL HELPER FUNCTIONS (Fixed) ---
 # --------------------------------------------------------------------------
 
 def get_video_id(url: str) -> str | None:
@@ -162,8 +164,7 @@ def clean_gemini_response(response_text: str) -> str:
 
 def format_timestamp(total_seconds: int) -> str:
     """Converts total seconds to [HH:MM:SS] or [MM:SS] format."""
-    
-    # Calculate hours, minutes, and remaining seconds
+    total_seconds = int(total_seconds)
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
     seconds = total_seconds % 60
@@ -184,11 +185,16 @@ class PDF(FPDF):
         self.add_font(self.font_name, "", str(base_path / "NotoSans-Regular.ttf"))
         self.add_font(self.font_name, "B", str(base_path / "NotoSans-Bold.ttf"))
 
+    # FIX: Uses multi_cell for wrapping the title (Main Heading Cutoff Fix)
     def create_title(self, title):
         self.set_font(self.font_name, "B", 24)
         self.set_fill_color(*COLORS["title_bg"])
         self.set_text_color(*COLORS["title_text"])
-        self.cell(0, 20, title, align="C", fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        
+        title_width = self.w - 2 * self.l_margin
+        
+        # Use multi_cell for wrapping and ensuring the title fits
+        self.multi_cell(title_width, 10, title, border=0, align="C", fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.ln(10)
 
     def create_section_heading(self, heading):
@@ -199,49 +205,12 @@ class PDF(FPDF):
         self.line(self.get_x(), self.get_y(), self.get_x() + 190, self.get_y())
         self.ln(5)
 
-    # UPDATED: This method now wraps the text using multi_cell
-    def write_highlighted_text(self, text, style=''):
+    def write_plain_text(self, text, style=''):
         self.set_font(self.font_name, style, 11)
         self.set_text_color(*COLORS["body_text"])
-        
         line_height = 6 
-        
-        parts = re.split(r'(<hl>.*?</hl>)', text)
-        
-        # Start a new block of text that can wrap
-        start_x = self.get_x()
-        start_y = self.get_y()
-        current_x = start_x
-        
-        for part in parts:
-            if part.startswith('<hl>'):
-                highlight_text = part[4:-5]
-                self.set_fill_color(*COLORS["highlight_bg"])
-                self.set_font(self.font_name, 'B', 11)
-                
-                # Use cell for the highlighted part to maintain background color
-                w = self.get_string_width(highlight_text)
-                self.cell(w, line_height, highlight_text, fill=True, new_x=XPos.CURRENT)
-                
-                self.set_font(self.font_name, style, 11)
-                current_x += w
-            else:
-                # Use write for the standard part, which is essential for placing continuous text
-                self.set_fill_color(255, 255, 255)
-                w = self.get_string_width(part)
-                
-                # Check if the part will exceed the page margin
-                if current_x + w > self.w - self.r_margin:
-                    # If it exceeds, force a line break using multi_cell to handle wrapping
-                    self.multi_cell(self.w - self.l_margin - self.r_margin, line_height, part, new_x=XPos.LMARGIN)
-                    current_x = self.get_x() + w # Reset current X position
-                else:
-                    self.write(line_height, part)
-                    current_x += w
-        
-        # Move to the next line after the entire content is written
-        self.ln(line_height) 
-
+        self.write(line_height, text)
+        self.ln()
 
 # --- Save to PDF Function (Primary Output) ---
 def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
@@ -271,10 +240,10 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
             is_nested = isinstance(item, dict) and 'details' in item
             line_height = 6 
             
-            # --- START A NEW WRAPPING BLOCK ---
-            
+            content_width = pdf.w - pdf.l_margin - pdf.r_margin - 35 
+
             if is_nested:
-                # 1. Write the Topic Name
+                # 1. Write the Topic Name (Bold)
                 pdf.set_font(pdf.font_name, "B", 11)
                 pdf.multi_cell(0, line_height, text=f"  {item.get('topic', '')}", new_x=XPos.LMARGIN)
                 
@@ -284,76 +253,57 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                     link = f"{base_url}&t={timestamp_sec}s"
                     detail_text = detail_item.get('detail', '')
                     
-                    # Create the full text line including the timestamp
-                    display_text = f"    • {detail_text} {format_timestamp(timestamp_sec)}"
-                    
-                    # Use multi_cell for wrapping the entire detail line
-                    pdf.set_font(pdf.font_name, "", 11)
-                    
-                    # Find and format highlighted parts within the detail text
-                    highlighted_parts = re.split(r'(<hl>.*?</hl>)', display_text)
-                    
-                    # Temporarily store the start position for hyperlinking
-                    start_x = pdf.get_x()
+                    text_content = f"    • {detail_text}"
                     start_y = pdf.get_y()
                     
-                    # We write the hyperlinked timestamp manually to the end of the line.
-                    # First, we write the text content which wraps.
-                    pdf.set_text_color(*COLORS["body_text"])
-                    
-                    # 90% width for the main text, reserving space for the timestamp on the same line
-                    main_text_width = pdf.w - pdf.l_margin - pdf.r_margin - 30 
-                    
-                    # Use write() parts for highlighting. The text is written and wraps automatically.
-                    # NOTE: multi_cell() is generally better for wrapping whole paragraphs. 
-                    # For combined text, we revert to writing parts and setting the link/text color at the end.
-                    
-                    # For simplicity and correctness with linking:
-                    # Write the content without the timestamp first, using a custom-wrapping function if needed,
-                    # but here we simplify to the most robust wrapping method:
-                    
+                    # Write the main text content, which will wrap
                     pdf.set_text_color(*COLORS["body_text"])
                     pdf.set_font(pdf.font_name, "", 11)
+                    pdf.multi_cell(content_width, line_height, text_content, border=0, new_x=XPos.RMARGIN, new_y=YPos.TOP)
                     
-                    # The text part (excluding the timestamp)
-                    text_only = display_text.replace(format_timestamp(timestamp_sec), '').strip()
+                    lines = pdf.y - start_y
                     
-                    # Use the standard multi_cell for wrapping the main text content (the detail)
-                    pdf.multi_cell(main_text_width, line_height, text_only, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                    # Move cursor back up and position it on the right to place the link
+                    pdf.set_xy(pdf.l_margin + content_width + 5, start_y)
                     
-                    # Now position the cursor back to the right margin to place the link
-                    
-                    # Go back to the position before the multi_cell wrapped the line. 
-                    # This is tricky with fpdf2, so we place the link at the START of the line 
-                    # and align it right, or place it on the line after the wrapped text.
-                    
-                    # Place the timestamp link right below the wrapped text for reliable placement
+                    # Place the timestamp link
                     pdf.set_text_color(*COLORS["link_text"])
-                    pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
+                    pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
                     
+                    # Reset cursor position
+                    pdf.set_xy(pdf.l_margin, start_y + lines)
+            
             else:
                 timestamp_sec = int(item.get('time', 0))
                 link = f"{base_url}&t={timestamp_sec}s"
                 
-                full_line = []
+                # Build the text content for non-nested items
+                text_parts = []
                 for sk, sv in item.items():
                     if sk != 'time':
                         title = sk.replace('_', ' ').title()
-                        full_line.append(f"• **{title}:** {str(sv)}")
+                        text_parts.append(f"• **{title}:** {str(sv)}")
                 
-                text_content = " ".join(full_line)
+                text_content = " ".join(text_parts).replace('**', '') # Remove bold markdown
                 
-                # 90% width for the main text
-                main_text_width = pdf.w - pdf.l_margin - pdf.r_margin - 30 
-                
-                # Use multi_cell for wrapping the main text content
-                pdf.set_font(pdf.font_name, "", 11)
-                pdf.set_text_color(*COLORS["body_text"])
-                pdf.multi_cell(main_text_width, line_height, text_content, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                start_y = pdf.get_y()
 
-                # Place the timestamp link right below the wrapped text for reliable placement
+                # Write the main text content, which will wrap
+                pdf.set_text_color(*COLORS["body_text"])
+                pdf.set_font(pdf.font_name, "", 11)
+                pdf.multi_cell(content_width, line_height, text_content, border=0, new_x=XPos.RMARGIN, new_y=YPos.TOP)
+
+                lines = pdf.y - start_y
+                
+                # Move cursor back up and position it on the right to place the link
+                pdf.set_xy(pdf.l_margin + content_width + 5, start_y)
+                
+                # Place the timestamp link
                 pdf.set_text_color(*COLORS["link_text"])
-                pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
+                pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+                
+                # Reset cursor position
+                pdf.set_xy(pdf.l_margin, start_y + lines)
                 
             pdf.ln(2) 
 
