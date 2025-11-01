@@ -1,73 +1,13 @@
 import streamlit as st
 import io
+# Import the functions from the new utils.py file
+from utils import extract_text_from_pdf, inject_custom_css 
 import time # Used for placeholder delay
 
-# --- 0. Custom CSS for Styling (Larger Font & Reduced Line Gap) ---
-def inject_custom_css():
-    st.markdown(
-        """
-        <style>
-        /* Increase overall font size for standard text and text areas */
-        p, label, .stMarkdown, .stTextArea, .stSelectbox {
-            font-size: 1.05rem !important; 
-        }
-
-        /* --- Custom class for output text with no gap --- */
-        .pdf-output-text {
-            border: 1px solid #ccc;
-            padding: 15px;
-            margin-top: 10px;
-            background-color: #f9f9f9;
-            /* Define a CSS variable to be used by the dynamic slider */
-            --custom-font-size: 1.05rem; 
-        }
-        /* Target paragraphs/lines inside the output container to control spacing */
-        .pdf-output-text p, .pdf-output-text div {
-            font-size: var(--custom-font-size); /* Uses the CSS variable for scaling */
-            line-height: 1.25;      /* Less line spacing (no gap) */
-            margin-bottom: 0.2em;   /* Minimal space between lines/paragraphs */
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+# Call the CSS injection function immediately upon script execution
 inject_custom_css()
 
-# --- 1. Caching Function to solve the Timestamp/Re-run Issue ---
-@st.cache_data
-def extract_text_from_pdf(pdf_file):
-    """
-    Reads PDF and extracts text. Cached to prevent re-running on widget changes.
-    """
-    if pdf_file is not None:
-        # Simulate text extraction time
-        time.sleep(2) 
-
-        # --- PLACEHOLDER LOGIC ---
-        st.session_state['file_name'] = pdf_file.name
-        placeholder_text = f"""
-        # Document: {pdf_file.name}
-        ## Introduction / Executive Summary
-        This section provides an overview of the analysis scope and the primary objectives. The research was initiated to determine the feasibility of the new feature set. The initial findings suggest a strong correlation between user engagement and the simplicity of the interface. This introductory text is intentionally longer to demonstrate the font scaling and line spacing.
-
-        ## Methodology / Approach
-        The method utilized a mixed-methods approach, combining quantitative A/B testing with qualitative user interviews. The testing ran over a 12-week period, gathering 50,000 data points. The control group used the old interface, and the test group used the proposed new layout.
-
-        ## Results / Key Findings
-        The key findings are significant. The test group showed a 45% increase in feature adoption compared to the control group (p < 0.01). However, the qualitative data revealed that 20% of users found the new feature placement confusing, indicating a potential design flaw in the final implementation.
-
-        ## Discussion / Analysis
-        The increase in adoption strongly validates the initial hypothesis regarding interface simplicity. The analysis suggests that minor tweaks to the feature placement could resolve the 20% confusion rate without sacrificing the overall engagement gains. The system proved robust, and the data integrity remained high throughout the test period.
-
-        ## Conclusion / Summary
-        In summary, the new feature set is highly effective and recommended for deployment, provided the minor design adjustment is implemented first. The project met all primary objectives, and the overall outcome is positive.
-        """
-        # --- END PLACEHOLDER LOGIC ---
-        
-        return placeholder_text
-    return None
-
-# --- Application Layout and Controls ---
+# --- Application Setup ---
 st.title("📄 AI-Powered PDF Analysis Tool")
 
 # Initialize session state for analysis response and file name
@@ -83,12 +23,14 @@ pdf_file = st.file_uploader("Upload your PDF document", type=["pdf"])
 pdf_text = None
 if pdf_file:
     with st.spinner(f'Processing and caching text from {pdf_file.name}...'):
-        # Caching ensures this is only called once per uploaded file
+        # Caching function called from utils.py
         pdf_text = extract_text_from_pdf(pdf_file)
     st.success("PDF text successfully extracted and cached. Ready for analysis!")
 
     
-# --- Sidebar for AI Controls ---
+# --------------------------------------------------------------------------
+# --- Sidebar for User Controls ---
+# --------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Analysis Controls")
 
@@ -150,7 +92,9 @@ with st.sidebar:
 
 st.markdown("---")
 
-# --- 4. User Prompt and Analysis Generation ---
+# --------------------------------------------------------------------------
+# --- Main Content: Prompt, Button, and Output ---
+# --------------------------------------------------------------------------
 
 if pdf_text:
     
