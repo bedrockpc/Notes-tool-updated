@@ -3,7 +3,6 @@ from utils import inject_custom_css, get_video_id, run_analysis_and_summarize, s
 from pathlib import Path
 from io import BytesIO 
 import json 
-import time
 
 # Call the CSS injection function
 inject_custom_css()
@@ -55,7 +54,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("⚙️ Analysis Controls")
 
-    # A. Slider for Output Words (AI Generation Control) - Max 10,000
+    # A. Slider for Output Words (AI Generation Control)
     max_words = st.slider(
         '1. Max Detail Length (Word Limit):', 
         min_value=50, 
@@ -126,7 +125,6 @@ if run_analysis:
     # Run Analysis Logic
     with st.spinner('Contacting AI, synthesizing notes, and generating JSON...'):
         
-        # The cached function executes the full Gemini pipeline
         data_json, error_msg, full_prompt = run_analysis_and_summarize(
             api_key, 
             transcript_text, 
@@ -135,8 +133,6 @@ if run_analysis:
             user_prompt_input
         )
         
-        st.session_state['full_prompt'] = full_prompt
-        
         if data_json:
             st.session_state['analysis_data'] = data_json
             st.success("Analysis Complete! Generating PDF...")
@@ -144,7 +140,6 @@ if run_analysis:
             # --- PDF GENERATION ---
             current_dir = Path(__file__).parent
             
-            # FIX: Check for font files directly in the current directory
             if not (current_dir / "NotoSans-Regular.ttf").exists():
                 st.error("🚨 Font files not found! PDF generation requires 'NotoSans-Regular.ttf' and 'NotoSans-Bold.ttf' to be in the same directory as app.py.")
                 st.session_state['pdf_ready'] = False
@@ -152,7 +147,6 @@ if run_analysis:
             else:
                 pdf_output = BytesIO()
                 try:
-                    # Pass the current directory as the font path
                     save_to_pdf(data_json, video_id, current_dir, pdf_output) 
                     st.session_state['pdf_buffer'] = pdf_output
                     st.session_state['pdf_ready'] = True
@@ -166,20 +160,6 @@ if run_analysis:
     
 st.markdown("---")
 
-# --------------------------------------------------------------------------
-# --- Output Display and Download ---
-# --------------------------------------------------------------------------
-
-# Display Raw Transcript Preview (using the custom CSS for line gaps and scaling)
-if transcript_text:
-    st.subheader(f"Raw Transcript Preview")
-    
-    st.markdown(
-        f'<div class="pdf-output-text">{transcript_text}</div>', 
-        unsafe_allow_html=True
-    )
-    st.markdown("---")
-
 # 5. Download Button
 if st.session_state.get('pdf_ready', False):
     st.subheader("📥 Download Hyperlinked PDF Notes")
@@ -190,8 +170,3 @@ if st.session_state.get('pdf_ready', False):
         file_name=output_filename, 
         mime="application/pdf" 
     )
-
-# Optional: Show the prompt that was sent to the AI
-if st.session_state.get('full_prompt'):
-    st.subheader("Full Prompt Sent to AI (Debugging):")
-    st.code(st.session_state['full_prompt'], language='markdown')
