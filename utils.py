@@ -12,6 +12,8 @@ from io import BytesIO
 import time
 
 # --- Configuration and Constants ---
+# (Keys, SYSTEM_PROMPT, and COLORS remain the same for brevity)
+# ... [Keeping original content for these sections] ...
 
 EXPECTED_KEYS = [
     "main_subject", "topic_breakdown", "key_vocabulary",
@@ -158,7 +160,6 @@ def clean_gemini_response(response_text: str) -> str:
     if match: return match.group(1) if match.group(1) else match.group(2)
     return response_text.strip()
 
-# FIX: Corrected the timestamp conversion logic to handle hours and ensure seconds < 60.
 def format_timestamp(total_seconds: int) -> str:
     """Converts total seconds to [HH:MM:SS] or [MM:SS] format."""
     
@@ -198,6 +199,7 @@ class PDF(FPDF):
         self.line(self.get_x(), self.get_y(), self.get_x() + 190, self.get_y())
         self.ln(5)
 
+    # UPDATED: This method now wraps the text using multi_cell
     def write_highlighted_text(self, text, style=''):
         self.set_font(self.font_name, style, 11)
         self.set_text_color(*COLORS["body_text"])
@@ -205,17 +207,41 @@ class PDF(FPDF):
         line_height = 6 
         
         parts = re.split(r'(<hl>.*?</hl>)', text)
+        
+        # Start a new block of text that can wrap
+        start_x = self.get_x()
+        start_y = self.get_y()
+        current_x = start_x
+        
         for part in parts:
             if part.startswith('<hl>'):
                 highlight_text = part[4:-5]
                 self.set_fill_color(*COLORS["highlight_bg"])
                 self.set_font(self.font_name, 'B', 11)
-                self.cell(self.get_string_width(highlight_text), line_height, highlight_text, fill=True)
+                
+                # Use cell for the highlighted part to maintain background color
+                w = self.get_string_width(highlight_text)
+                self.cell(w, line_height, highlight_text, fill=True, new_x=XPos.CURRENT)
+                
                 self.set_font(self.font_name, style, 11)
+                current_x += w
             else:
+                # Use write for the standard part, which is essential for placing continuous text
                 self.set_fill_color(255, 255, 255)
-                self.write(line_height, part)
-        self.ln()
+                w = self.get_string_width(part)
+                
+                # Check if the part will exceed the page margin
+                if current_x + w > self.w - self.r_margin:
+                    # If it exceeds, force a line break using multi_cell to handle wrapping
+                    self.multi_cell(self.w - self.l_margin - self.r_margin, line_height, part, new_x=XPos.LMARGIN)
+                    current_x = self.get_x() + w # Reset current X position
+                else:
+                    self.write(line_height, part)
+                    current_x += w
+        
+        # Move to the next line after the entire content is written
+        self.ln(line_height) 
+
 
 # --- Save to PDF Function (Primary Output) ---
 def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
@@ -244,41 +270,91 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
         for item in values:
             is_nested = isinstance(item, dict) and 'details' in item
             line_height = 6 
-
+            
+            # --- START A NEW WRAPPING BLOCK ---
+            
             if is_nested:
+                # 1. Write the Topic Name
                 pdf.set_font(pdf.font_name, "B", 11)
-                pdf.multi_cell(0, line_height, text=f"  {item.get('topic', '')}")
+                pdf.multi_cell(0, line_height, text=f"  {item.get('topic', '')}", new_x=XPos.LMARGIN)
+                
+                # 2. Write all Details for that topic
                 for detail_item in item.get('details', []):
                     timestamp_sec = int(detail_item.get('time', 0))
                     link = f"{base_url}&t={timestamp_sec}s"
-                    display_text = f"    • {detail_item.get('detail', '')}"
+                    detail_text = detail_item.get('detail', '')
                     
-                    pdf.write(line_height, "") 
-                    pdf.write_highlighted_text(display_text)
+                    # Create the full text line including the timestamp
+                    display_text = f"    • {detail_text} {format_timestamp(timestamp_sec)}"
+                    
+                    # Use multi_cell for wrapping the entire detail line
+                    pdf.set_font(pdf.font_name, "", 11)
+                    
+                    # Find and format highlighted parts within the detail text
+                    highlighted_parts = re.split(r'(<hl>.*?</hl>)', display_text)
+                    
+                    # Temporarily store the start position for hyperlinking
+                    start_x = pdf.get_x()
+                    start_y = pdf.get_y()
+                    
+                    # We write the hyperlinked timestamp manually to the end of the line.
+                    # First, we write the text content which wraps.
+                    pdf.set_text_color(*COLORS["body_text"])
+                    
+                    # 90% width for the main text, reserving space for the timestamp on the same line
+                    main_text_width = pdf.w - pdf.l_margin - pdf.r_margin - 30 
+                    
+                    # Use write() parts for highlighting. The text is written and wraps automatically.
+                    # NOTE: multi_cell() is generally better for wrapping whole paragraphs. 
+                    # For combined text, we revert to writing parts and setting the link/text color at the end.
+                    
+                    # For simplicity and correctness with linking:
+                    # Write the content without the timestamp first, using a custom-wrapping function if needed,
+                    # but here we simplify to the most robust wrapping method:
+                    
+                    pdf.set_text_color(*COLORS["body_text"])
+                    pdf.set_font(pdf.font_name, "", 11)
+                    
+                    # The text part (excluding the timestamp)
+                    text_only = display_text.replace(format_timestamp(timestamp_sec), '').strip()
+                    
+                    # Use the standard multi_cell for wrapping the main text content (the detail)
+                    pdf.multi_cell(main_text_width, line_height, text_only, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                    
+                    # Now position the cursor back to the right margin to place the link
+                    
+                    # Go back to the position before the multi_cell wrapped the line. 
+                    # This is tricky with fpdf2, so we place the link at the START of the line 
+                    # and align it right, or place it on the line after the wrapped text.
+                    
+                    # Place the timestamp link right below the wrapped text for reliable placement
                     pdf.set_text_color(*COLORS["link_text"])
                     pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
+                    
             else:
                 timestamp_sec = int(item.get('time', 0))
                 link = f"{base_url}&t={timestamp_sec}s"
                 
-                pdf.write(line_height, "") 
-                
-                main_text_parts = []
+                full_line = []
                 for sk, sv in item.items():
                     if sk != 'time':
                         title = sk.replace('_', ' ').title()
-                        main_text_parts.append((f"• **{title}:** ", f"{str(sv)}"))
-                        
-                for title_part, value_part in main_text_parts:
-                    pdf.set_text_color(*COLORS["body_text"])
-                    pdf.set_font(pdf.font_name, "B", 11)
-                    pdf.write(line_height, title_part.replace('**', ''))
-                    
-                    pdf.set_font(pdf.font_name, "", 11)
-                    pdf.write_highlighted_text(value_part)
+                        full_line.append(f"• **{title}:** {str(sv)}")
+                
+                text_content = " ".join(full_line)
+                
+                # 90% width for the main text
+                main_text_width = pdf.w - pdf.l_margin - pdf.r_margin - 30 
+                
+                # Use multi_cell for wrapping the main text content
+                pdf.set_font(pdf.font_name, "", 11)
+                pdf.set_text_color(*COLORS["body_text"])
+                pdf.multi_cell(main_text_width, line_height, text_content, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
+                # Place the timestamp link right below the wrapped text for reliable placement
                 pdf.set_text_color(*COLORS["link_text"])
                 pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
+                
             pdf.ln(2) 
 
     pdf.output(output)
