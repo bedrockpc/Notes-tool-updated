@@ -101,12 +101,10 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
         response = model.generate_content(full_prompt)
         response_text = response.text
         
-        # 1. Robust JSON Extraction (Fixes the delimiter error)
-        # Tries to find the entire content between the first { and the last }
+        # 1. Robust JSON Extraction
         match = re.search(r'\{.*\}', response_text.strip(), re.DOTALL)
         
         if not match:
-            # Fallback for models that use markdown fences (```json ... ```)
             match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
         
         if match:
@@ -116,11 +114,9 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
             cleaned_response = re.sub(r'[\*\•\<\>h/l]', '', cleaned_response) 
             cleaned_response = cleaned_response.rstrip(',').rstrip('.').strip()
 
-            # Ensure the structure ends with }
             if not cleaned_response.endswith('}'):
                 cleaned_response += '}'
         else:
-            # If no JSON structure is found, use the raw response (will lead to JSON error)
             cleaned_response = response_text.strip() 
 
 
@@ -144,6 +140,14 @@ def inject_custom_css():
             font-size: 1.05rem !important; 
         }
 
+        /* Container for raw transcript preview (no longer used, but CSS is harmless) */
+        .pdf-output-text {
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin-top: 10px;
+            background-color: #f9f9f9;
+            --custom-font-size: 1.05rem; 
+        }
         /* Tight line spacing for preview text */
         .pdf-output-text p, .pdf-output-text div {
             font-size: var(--custom-font-size);
@@ -287,6 +291,7 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                         title_str = f"• {title}: "
                         pdf.set_text_color(*COLORS["heading_text"]) 
                         pdf.set_font(pdf.font_name, "B", 11)
+                        # Use cell to write the bold title inline
                         pdf.cell(pdf.get_string_width(title_str), line_height, title_str, new_x=XPos.CURRENT, new_y=YPos.TOP)
                         current_x += pdf.get_string_width(title_str)
                         
@@ -298,17 +303,21 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                         pdf.set_text_color(*COLORS["body_text"])
                         pdf.set_font(pdf.font_name, "", 11)
                         
+                        # Use multi_cell for the value to ensure wrapping
                         pdf.multi_cell(remaining_width, line_height, value_str, border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                         
                         current_x = pdf.l_margin
                 
                 final_y = pdf.y
                 
+                # Position the cursor for the link placement
                 pdf.set_xy(pdf.l_margin + content_width + 5, start_y)
                 
+                # Place the timestamp link
                 pdf.set_text_color(*COLORS["link_text"])
                 pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
                 
+                # Reset cursor position
                 pdf.set_xy(pdf.l_margin, final_y)
                 
             pdf.ln(2) 
