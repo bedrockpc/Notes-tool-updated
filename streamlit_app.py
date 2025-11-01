@@ -3,6 +3,7 @@ from utils import inject_custom_css, get_video_id, run_analysis_and_summarize, s
 from pathlib import Path
 from io import BytesIO 
 import json 
+import time
 
 # Call the CSS injection function
 inject_custom_css()
@@ -147,10 +148,10 @@ if run_analysis:
             else:
                 pdf_output = BytesIO()
                 try:
+                    # Pass the current directory as the font path
                     save_to_pdf(data_json, video_id, current_dir, pdf_output) 
                     st.session_state['pdf_buffer'] = pdf_output
                     st.session_state['pdf_ready'] = True
-                    st.session_state['json_output'] = json.dumps(data_json, indent=2)
                 except Exception as e:
                     st.error(f"Error during PDF generation: {e}")
                     st.session_state['pdf_ready'] = False
