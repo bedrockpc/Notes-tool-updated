@@ -58,7 +58,10 @@ with st.sidebar:
     # A. Slider for Output Words (AI Generation Control)
     max_words = st.slider(
         '1. Max Detail Length (Word Limit):', 
-        min_value=50, max_value=500, value=200, step=25,
+        min_value=50, 
+        max_value=10000, # UPDATED MAX VALUE
+        value=200, 
+        step=50, # UPDATED STEP SIZE
         help="Controls the word limit for each detail/explanation extracted by the AI."
     )
     
@@ -76,9 +79,9 @@ with st.sidebar:
         'Teacher Insights': False, 
         'Exam Focus Points': True, 
         'Common Mistakes': False,
-        'Key Points': True,         # NEW
-        'Short Tricks': False,      # NEW
-        'Must Remembers': True      # NEW
+        'Key Points': True,         
+        'Short Tricks': False,      
+        'Must Remembers': True      
     }
     
     sections_list = []
