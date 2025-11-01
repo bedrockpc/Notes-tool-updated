@@ -1,6 +1,6 @@
 # utils.py
 # -*- coding: utf-8 -*-
-import streamlit as st # NEW: Required for Streamlit utilities
+import streamlit as st
 import os
 import json
 import re
@@ -8,51 +8,46 @@ from pathlib import Path
 import google.generativeai as genai
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-import pandas as pd
 from io import BytesIO 
-import time # NEW: Required for simulating delay in extract_text_from_pdf
+import time
 
 # --- Configuration and Constants ---
 
 EXPECTED_KEYS = [
     "main_subject", "topic_breakdown", "key_vocabulary",
     "formulas_and_principles", "teacher_insights",
-    "exam_focus_points", "common_mistakes_explained"
+    "exam_focus_points", "common_mistakes_explained", 
+    # NEW SECTIONS ADDED:
+    "key_points", "short_tricks", "must_remembers" 
 ]
 
 SYSTEM_PROMPT = """
-You are a master academic analyst creating a concise, timestamped study guide from a video transcript file. The transcript text contains timestamps in formats like (MM:SS) or [HH:MM:SS].
+You are a master academic analyst creating a concise, hyperlinked study guide from a video transcript file. The transcript text contains timestamps in formats like (MM:SS) or [HH:MM:SS].
 
 **Primary Goal:** Create a detailed summary. For any key point you extract, you MUST find its closest preceding timestamp in the text and include it in your response as total seconds.
 
 **Instructions:**
 1.  Analyze the entire transcript.
 2.  For every piece of information you extract, find the nearest timestamp that comes *before* it in the text. Convert that timestamp into **total seconds** (e.g., (01:30) becomes 90).
-3.  **Highlighting:** Inside any 'detail', 'definition', 'explanation', or 'insight' string, find the single most critical phrase (3-5 words) and wrap it in `<hl>` and `</hl>` tags. For example: 'The derivative is a <hl>rate of change</hl>.' Do this only once per item where appropriate.
+3.  **Highlighting:** Inside any 'detail', 'definition', 'explanation', or 'insight' string, find the single most critical phrase (3-5 words) and wrap it in `<hl>` and `</hl>` tags. Do this only once per item where appropriate.
 4.  Be concise. Each point must be a short, clear sentence.
-5.  Extract the following information:
-    -   main_subject: A short phrase identifying the main subject.
-    -   topic_breakdown: For each topic, list details as objects with "detail" and "time" keys.
-    -   key_vocabulary: A list of objects with "term", "definition", and "time" keys.
-    -   formulas_and_principles: A list of objects with "formula_or_principle", "explanation", and "time" keys.
-    -   teacher_insights: A list of objects with "insight", and "time" keys.
-    -   exam_focus_points: A list of objects with "point", and "time" keys.
-    -   common_mistakes_explained: A list of objects with "mistake", "explanation", and "time" keys.
-6.  Return your output **only** as a single, valid JSON object.
+5.  Extract the information for the following categories. **Only include a category in the final JSON if the user specifically requested it.**
 
-The JSON structure must be exactly as follows:
+The JSON structure must include these keys with objects/arrays:
 {
-  "main_subject": "Subject Name",
+  "main_subject": "A short phrase identifying the main subject.",
   "topic_breakdown": [{"topic": "Topic 1", "details": [{"detail": "This is a <hl>short detail</hl>.", "time": 120}]}],
   "key_vocabulary": [{"term": "Term 1", "definition": "A <hl>short definition</hl>.", "time": 150}],
   "formulas_and_principles": [{"formula_or_principle": "Principle 1", "explanation": "A <hl>brief explanation</hl>.", "time": 180}],
   "teacher_insights": [{"insight": "<hl>Short insight</hl> 1.", "time": 210}],
   "exam_focus_points": [{"point": "Brief <hl>focus point</hl> 1.", "time": 240}],
-  "common_mistakes_explained": [{"mistake": "Mistake 1", "explanation": "A <hl>short explanation</hl>.", "time": 270}]
+  "common_mistakes_explained": [{"mistake": "Mistake 1", "explanation": "A <hl>short explanation</hl>.", "time": 270}],
+  "key_points": [{"point": "A major <hl>takeaway point</hl>.", "time": 300}],
+  "short_tricks": [{"trick": "A <hl>quick method</hl> to solve a problem.", "time": 330}],
+  "must_remembers": [{"fact": "A fact that <hl>must be memorized</hl>.", "time": 360}]
 }
 """
 
-# --- Color Palette (Used for PDF generation) ---
 COLORS = {
     "title_bg": (40, 54, 85), "title_text": (255, 255, 255),
     "heading_text": (40, 54, 85), "link_text": (0, 0, 255), 
@@ -61,23 +56,72 @@ COLORS = {
 }
 
 # --------------------------------------------------------------------------
-# --- NEW/UPDATED STREAMLIT UTILITY FUNCTIONS ---
+# --- STREAMLIT UTILITY FUNCTIONS ---
 # --------------------------------------------------------------------------
 
-# NEW: Custom CSS Injection Function
+@st.cache_data
+def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: int, sections_list: list, user_prompt: str):
+    """
+    Runs the full analysis using the Gemini API. 
+    Cached to prevent re-running if parameters haven't changed.
+    """
+    
+    sections_to_process = ", ".join(sections_list)
+    
+    full_prompt = f"""
+    {SYSTEM_PROMPT}
+
+    **USER CONSTRAINTS (from Streamlit app):**
+    - Max Detail Length: {max_words} words (Limit the length of each detail/explanation string).
+    - **REQUIRED OUTPUT CATEGORIES:** **{sections_to_process}**
+    - User Refinement Prompt: {user_prompt}
+
+    Transcript to Analyze:
+    ---
+    {transcript_text}
+    ---
+    """
+    
+    if not api_key:
+        time.sleep(1)
+        return None, "API Key Missing", full_prompt
+        
+    print("    > Sending transcript to Gemini API...")
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.5-flash') 
+        
+        response = model.generate_content(full_prompt)
+        
+        cleaned_response = clean_gemini_response(response.text)
+        
+        # Aggressive JSON Post-Processing/Error Handling
+        cleaned_response = cleaned_response.strip().rstrip(',').rstrip('.')
+        if not cleaned_response.endswith('}'):
+            last_bracket = cleaned_response.rfind('}')
+            if last_bracket != -1:
+                cleaned_response = cleaned_response[:last_bracket + 1]
+
+        json_data = json.loads(cleaned_response)
+        
+        return json_data, None, full_prompt
+        
+    except json.JSONDecodeError:
+        return None, "JSON DECODE ERROR: AI response was malformed.", full_prompt
+    except Exception as e:
+        return None, f"Gemini API Error: {e}", full_prompt
+        
 def inject_custom_css():
-    """
-    Injects custom CSS for application-wide styling, including font size and line spacing.
-    """
+    """Injects custom CSS for application-wide styling."""
     st.markdown(
         """
         <style>
-        /* Increase overall font size for standard text and text areas */
+        /* Ensures controls and text are slightly larger */
         p, label, .stMarkdown, .stTextArea, .stSelectbox {
             font-size: 1.05rem !important; 
         }
 
-        /* --- Custom class for output text with no gap --- */
+        /* Container for raw transcript preview */
         .pdf-output-text {
             border: 1px solid #ccc;
             padding: 15px;
@@ -85,54 +129,19 @@ def inject_custom_css():
             background-color: #f9f9f9;
             --custom-font-size: 1.05rem; 
         }
-        /* Target paragraphs/lines inside the output container to control spacing */
+        /* Tight line spacing for preview text */
         .pdf-output-text p, .pdf-output-text div {
-            font-size: var(--custom-font-size); /* Uses the CSS variable for scaling */
-            line-height: 1.25;      /* Less line spacing (no gap) */
-            margin-bottom: 0.2em;   /* Minimal space between lines/paragraphs */
+            font-size: var(--custom-font-size);
+            line-height: 1.25;
+            margin-bottom: 0.2em;
         }
         </style>
         """,
         unsafe_allow_html=True
     )
-
-# NEW: Caching Function (Solves the Timestamp/Re-run Issue)
-@st.cache_data
-def extract_text_from_pdf(pdf_file):
-    """
-    Reads PDF and extracts text. Cached to prevent re-running on widget changes.
-    Returns placeholder text for demonstration purposes.
-    """
-    if pdf_file is not None:
-        # Simulate text extraction time
-        time.sleep(2) 
-
-        # --- PLACEHOLDER LOGIC (Replace this with your actual PDF extraction code) ---
-        st.session_state['file_name'] = pdf_file.name
-        placeholder_text = f"""
-        # Document: {pdf_file.name}
-        ## Introduction / Executive Summary
-        This section provides an overview of the analysis scope and the primary objectives. The research was initiated to determine the feasibility of the new feature set. The initial findings suggest a strong correlation between user engagement and the simplicity of the interface.
-
-        ## Methodology / Approach
-        The method utilized a mixed-methods approach, combining quantitative A/B testing with qualitative user interviews. The testing ran over a 12-week period, gathering 50,000 data points.
-
-        ## Results / Key Findings
-        The key findings are significant. The test group showed a 45% increase in feature adoption compared to the control group (p < 0.01).
-
-        ## Discussion / Analysis
-        The increase in adoption strongly validates the initial hypothesis regarding interface simplicity. The analysis suggests that minor tweaks to the feature placement could resolve the confusion.
-
-        ## Conclusion / Summary
-        In summary, the new feature set is highly effective and recommended for deployment.
-        """
-        # --- END PLACEHOLDER LOGIC ---
-        
-        return placeholder_text
-    return None
-
+    
 # --------------------------------------------------------------------------
-# --- ORIGINAL VIDEO ANALYSIS FUNCTIONS (KEPT & MODIFIED) ---
+# --- ORIGINAL HELPER FUNCTIONS (Corrected) ---
 # --------------------------------------------------------------------------
 
 def get_video_id(url: str) -> str | None:
@@ -146,50 +155,18 @@ def get_video_id(url: str) -> str | None:
     return None
 
 def clean_gemini_response(response_text: str) -> str:
-    # Extracts the JSON object, handles markdown fences (```json...```)
     match = re.search(r'```json\s*(\{.*?\})\s*```|(\{.*?\})', response_text, re.DOTALL)
     if match: return match.group(1) if match.group(1) else match.group(2)
     return response_text.strip()
 
-def summarize_with_gemini(api_key: str, transcript_text: str) -> dict | None:
-    print("    > Sending transcript to Gemini API...")
-    try:
-        genai.configure(api_key=api_key)
-        # Using the highly stable model
-        model = genai.GenerativeModel('gemini-2.5-flash') 
-        
-        # 1. Send Request
-        response = model.generate_content(f"{SYSTEM_PROMPT}\n\nTranscript:\n---\n{transcript_text}")
-        
-        # 2. Extract JSON (Handles Markdown Fence)
-        cleaned_response = clean_gemini_response(response.text)
-
-        # 3. Aggressive JSON Post-Processing (FIX for Incomplete Output)
-        if cleaned_response.endswith(','):
-            cleaned_response = cleaned_response.rstrip(',')
-        if not cleaned_response.endswith('}'):
-            last_bracket = cleaned_response.rfind('}')
-            if last_bracket != -1:
-                cleaned_response = cleaned_response[:last_bracket + 1]
-
-        # 4. Attempt to Load JSON
-        return json.loads(cleaned_response)
-        
-    except json.JSONDecodeError:
-        print("    > JSON DECODE ERROR: Failed to parse API response.")
-        print(f"    > Truncated Response (first 500 chars): {cleaned_response[:500]}...")
-        return None
-    except Exception as e:
-        print(f"    > An unexpected error occurred with the API call: {e}")
-        return None
-
+# FIX: Ensures MM:SS format and handles the "seconds only or missing :" issue
 def format_timestamp(seconds: int) -> str:
+    """Converts total seconds to [MM:SS] format."""
     minutes = seconds // 60
     seconds = seconds % 60
     return f"[{minutes:02}:{seconds:02}]"
 
 def ensure_valid_youtube_url(video_id: str) -> str:
-    """Returns a properly formatted YouTube base URL for hyperlinking."""
     return f"https://www.youtube.com/watch?v={video_id}"
 
 # --- PDF Class ---
@@ -218,17 +195,22 @@ class PDF(FPDF):
     def write_highlighted_text(self, text, style=''):
         self.set_font(self.font_name, style, 11)
         self.set_text_color(*COLORS["body_text"])
+        
+        # Use a low line height for the body text to achieve no unwanted gaps
+        # Setting line height to 5.5 to 6 is usually good for a font size of 11.
+        line_height = 6 
+        
         parts = re.split(r'(<hl>.*?</hl>)', text)
         for part in parts:
             if part.startswith('<hl>'):
                 highlight_text = part[4:-5]
                 self.set_fill_color(*COLORS["highlight_bg"])
                 self.set_font(self.font_name, 'B', 11)
-                self.cell(self.get_string_width(highlight_text), 7, highlight_text, fill=True)
+                self.cell(self.get_string_width(highlight_text), line_height, highlight_text, fill=True)
                 self.set_font(self.font_name, style, 11)
             else:
                 self.set_fill_color(255, 255, 255)
-                self.write(7, part)
+                self.write(line_height, part)
         self.ln()
 
 # --- Save to PDF Function (Primary Output) ---
@@ -239,39 +221,65 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
     pdf = PDF(font_path=font_path)
     pdf.add_page()
     pdf.create_title(data.get("main_subject", "Video Summary"))
+    
+    # Map friendly section names to their JSON keys
+    key_mapping = {
+        'Topic Breakdown': 'topic_breakdown', 'Key Vocabulary': 'key_vocabulary',
+        'Formulas & Principles': 'formulas_and_principles', 'Teacher Insights': 'teacher_insights',
+        'Exam Focus Points': 'exam_focus_points', 'Common Mistakes': 'common_mistakes_explained',
+        'Key Points': 'key_points', 'Short Tricks': 'short_tricks', 'Must Remembers': 'must_remembers'
+    }
 
-    for key, values in data.items():
-        if key == "main_subject" or not values:
+    # Iterate through all possible keys to maintain a consistent order
+    for friendly_name, json_key in key_mapping.items():
+        values = data.get(json_key)
+        if not values:
             continue
-        pdf.create_section_heading(key.replace('_', ' ').title())
+            
+        pdf.create_section_heading(friendly_name)
+        
         for item in values:
-            is_nested = any(isinstance(v, list) for v in item.values())
+            is_nested = isinstance(item, dict) and 'details' in item
+            line_height = 6 # Consistent line height for all text elements
+
             if is_nested:
                 pdf.set_font(pdf.font_name, "B", 11)
-                pdf.multi_cell(0, 7, text=f"  {item.get('topic', '')}")
+                pdf.multi_cell(0, line_height, text=f"  {item.get('topic', '')}")
                 for detail_item in item.get('details', []):
                     timestamp_sec = int(detail_item.get('time', 0))
                     link = f"{base_url}&t={timestamp_sec}s"
                     display_text = f"    • {detail_item.get('detail', '')}"
+                    
+                    pdf.write(line_height, "") # Start the line
                     pdf.write_highlighted_text(display_text)
                     pdf.set_text_color(*COLORS["link_text"])
-                    # FIX: Corrected typo for standard MM:SS display
-                    pdf.cell(0, 7, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
+                    pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
             else:
                 timestamp_sec = int(item.get('time', 0))
                 link = f"{base_url}&t={timestamp_sec}s"
+                
+                pdf.write(line_height, "") # Start the line
+                
+                # Build the main text (e.g., 'Term: Definition' or 'Point: Detail')
+                main_text_parts = []
                 for sk, sv in item.items():
                     if sk != 'time':
-                        pdf.set_text_color(*COLORS["body_text"])
-                        pdf.set_font(pdf.font_name, "B", 11)
-                        pdf.write(7, f"• {sk.replace('_', ' ').title()}: ")
-                        pdf.set_font(pdf.font_name, "", 11)
-                        pdf.write_highlighted_text(str(sv))
+                        title = sk.replace('_', ' ').title()
+                        main_text_parts.append((f"• **{title}:** ", f"{str(sv)}"))
+                        
+                for title_part, value_part in main_text_parts:
+                    # Write title in bold
+                    pdf.set_text_color(*COLORS["body_text"])
+                    pdf.set_font(pdf.font_name, "B", 11)
+                    pdf.write(line_height, title_part.replace('**', '')) # write the title
+                    
+                    # Write value and potential highlight
+                    pdf.set_font(pdf.font_name, "", 11)
+                    pdf.write_highlighted_text(value_part)
+
                 pdf.set_text_color(*COLORS["link_text"])
-                # FIX: Corrected typo for standard MM:SS display
-                pdf.cell(0, 7, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
-            pdf.ln(4)
-        pdf.ln(5)
+                pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
+            pdf.ln(2) # Minimal space between items
 
     pdf.output(output)
     if isinstance(output, BytesIO):
