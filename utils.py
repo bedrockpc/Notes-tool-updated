@@ -158,18 +158,25 @@ def clean_gemini_response(response_text: str) -> str:
     if match: return match.group(1) if match.group(1) else match.group(2)
     return response_text.strip()
 
-def format_timestamp(seconds: int) -> str:
-    """Converts total seconds to [MM:SS] format."""
-    minutes = seconds // 60
-    seconds = seconds % 60
-    return f"[{minutes:02}:{seconds:02}]"
+# FIX: Corrected the timestamp conversion logic to handle hours and ensure seconds < 60.
+def format_timestamp(total_seconds: int) -> str:
+    """Converts total seconds to [HH:MM:SS] or [MM:SS] format."""
+    
+    # Calculate hours, minutes, and remaining seconds
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    
+    if hours > 0:
+        return f"[{hours:02}:{minutes:02}:{seconds:02}]"
+    else:
+        return f"[{minutes:02}:{seconds:02}]"
 
 def ensure_valid_youtube_url(video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 # --- PDF Class ---
 class PDF(FPDF):
-    # FIX: base_path is now used directly instead of looking for a 'fonts/' folder
     def __init__(self, base_path, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.font_name = "NotoSans"
@@ -195,7 +202,6 @@ class PDF(FPDF):
         self.set_font(self.font_name, style, 11)
         self.set_text_color(*COLORS["body_text"])
         
-        # Consistent line height for all text elements to reduce unwanted gaps
         line_height = 6 
         
         parts = re.split(r'(<hl>.*?</hl>)', text)
@@ -216,7 +222,6 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
     print(f"    > Saving elegantly hyperlinked PDF...")
     base_url = ensure_valid_youtube_url(video_id) 
     
-    # FIX: Pass font_path (which is current_dir from app.py) as base_path
     pdf = PDF(base_path=font_path) 
     pdf.add_page()
     pdf.create_title(data.get("main_subject", "Video Summary"))
