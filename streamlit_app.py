@@ -55,13 +55,13 @@ with st.sidebar:
     st.markdown("---")
     st.header("⚙️ Analysis Controls")
 
-    # A. Slider for Output Words (AI Generation Control)
+    # A. Slider for Output Words (AI Generation Control) - Max 10,000
     max_words = st.slider(
         '1. Max Detail Length (Word Limit):', 
         min_value=50, 
-        max_value=10000, # UPDATED MAX VALUE
+        max_value=10000, 
         value=200, 
-        step=50, # UPDATED STEP SIZE
+        step=50, 
         help="Controls the word limit for each detail/explanation extracted by the AI."
     )
     
@@ -71,7 +71,6 @@ with st.sidebar:
     st.subheader("2. Select Output Sections")
     st.markdown("Choose which categories you want in the final notes:")
     
-    # The full 9-section checklist based on your request
     section_options = {
         'Topic Breakdown': True, 
         'Key Vocabulary': True,
@@ -136,7 +135,6 @@ if run_analysis:
             user_prompt_input
         )
         
-        # Save the full prompt for display/debugging
         st.session_state['full_prompt'] = full_prompt
         
         if data_json:
@@ -145,16 +143,17 @@ if run_analysis:
 
             # --- PDF GENERATION ---
             current_dir = Path(__file__).parent
-            font_path = current_dir / "fonts" 
-
-            if not font_path.exists():
-                st.error("🚨 Font folder 'fonts/' not found! PDF generation requires a 'fonts' folder containing NotoSans-*.ttf files next to app.py.")
+            
+            # FIX: Check for font files directly in the current directory
+            if not (current_dir / "NotoSans-Regular.ttf").exists():
+                st.error("🚨 Font files not found! PDF generation requires 'NotoSans-Regular.ttf' and 'NotoSans-Bold.ttf' to be in the same directory as app.py.")
                 st.session_state['pdf_ready'] = False
                 
             else:
                 pdf_output = BytesIO()
                 try:
-                    save_to_pdf(data_json, video_id, font_path, pdf_output)
+                    # Pass the current directory as the font path
+                    save_to_pdf(data_json, video_id, current_dir, pdf_output) 
                     st.session_state['pdf_buffer'] = pdf_output
                     st.session_state['pdf_ready'] = True
                     st.session_state['json_output'] = json.dumps(data_json, indent=2)
@@ -175,8 +174,6 @@ st.markdown("---")
 if transcript_text:
     st.subheader(f"Raw Transcript Preview")
     
-    # We don't have a specific scaling slider for the transcript preview, 
-    # but the general custom CSS for font size and line gaps is applied here.
     st.markdown(
         f'<div class="pdf-output-text">{transcript_text}</div>', 
         unsafe_allow_html=True
