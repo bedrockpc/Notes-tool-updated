@@ -17,7 +17,6 @@ EXPECTED_KEYS = [
     "main_subject", "topic_breakdown", "key_vocabulary",
     "formulas_and_principles", "teacher_insights",
     "exam_focus_points", "common_mistakes_explained", 
-    # NEW SECTIONS ADDED:
     "key_points", "short_tricks", "must_remembers" 
 ]
 
@@ -159,7 +158,6 @@ def clean_gemini_response(response_text: str) -> str:
     if match: return match.group(1) if match.group(1) else match.group(2)
     return response_text.strip()
 
-# FIX: Ensures MM:SS format and handles the "seconds only or missing :" issue
 def format_timestamp(seconds: int) -> str:
     """Converts total seconds to [MM:SS] format."""
     minutes = seconds // 60
@@ -171,11 +169,12 @@ def ensure_valid_youtube_url(video_id: str) -> str:
 
 # --- PDF Class ---
 class PDF(FPDF):
-    def __init__(self, font_path, *args, **kwargs):
+    # FIX: base_path is now used directly instead of looking for a 'fonts/' folder
+    def __init__(self, base_path, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.font_name = "NotoSans"
-        self.add_font(self.font_name, "", str(font_path / "NotoSans-Regular.ttf"))
-        self.add_font(self.font_name, "B", str(font_path / "NotoSans-Bold.ttf"))
+        self.add_font(self.font_name, "", str(base_path / "NotoSans-Regular.ttf"))
+        self.add_font(self.font_name, "B", str(base_path / "NotoSans-Bold.ttf"))
 
     def create_title(self, title):
         self.set_font(self.font_name, "B", 24)
@@ -196,8 +195,7 @@ class PDF(FPDF):
         self.set_font(self.font_name, style, 11)
         self.set_text_color(*COLORS["body_text"])
         
-        # Use a low line height for the body text to achieve no unwanted gaps
-        # Setting line height to 5.5 to 6 is usually good for a font size of 11.
+        # Consistent line height for all text elements to reduce unwanted gaps
         line_height = 6 
         
         parts = re.split(r'(<hl>.*?</hl>)', text)
@@ -218,7 +216,8 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
     print(f"    > Saving elegantly hyperlinked PDF...")
     base_url = ensure_valid_youtube_url(video_id) 
     
-    pdf = PDF(font_path=font_path)
+    # FIX: Pass font_path (which is current_dir from app.py) as base_path
+    pdf = PDF(base_path=font_path) 
     pdf.add_page()
     pdf.create_title(data.get("main_subject", "Video Summary"))
     
@@ -230,7 +229,6 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
         'Key Points': 'key_points', 'Short Tricks': 'short_tricks', 'Must Remembers': 'must_remembers'
     }
 
-    # Iterate through all possible keys to maintain a consistent order
     for friendly_name, json_key in key_mapping.items():
         values = data.get(json_key)
         if not values:
@@ -240,7 +238,7 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
         
         for item in values:
             is_nested = isinstance(item, dict) and 'details' in item
-            line_height = 6 # Consistent line height for all text elements
+            line_height = 6 
 
             if is_nested:
                 pdf.set_font(pdf.font_name, "B", 11)
@@ -250,7 +248,7 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                     link = f"{base_url}&t={timestamp_sec}s"
                     display_text = f"    • {detail_item.get('detail', '')}"
                     
-                    pdf.write(line_height, "") # Start the line
+                    pdf.write(line_height, "") 
                     pdf.write_highlighted_text(display_text)
                     pdf.set_text_color(*COLORS["link_text"])
                     pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
@@ -258,9 +256,8 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                 timestamp_sec = int(item.get('time', 0))
                 link = f"{base_url}&t={timestamp_sec}s"
                 
-                pdf.write(line_height, "") # Start the line
+                pdf.write(line_height, "") 
                 
-                # Build the main text (e.g., 'Term: Definition' or 'Point: Detail')
                 main_text_parts = []
                 for sk, sv in item.items():
                     if sk != 'time':
@@ -268,18 +265,16 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                         main_text_parts.append((f"• **{title}:** ", f"{str(sv)}"))
                         
                 for title_part, value_part in main_text_parts:
-                    # Write title in bold
                     pdf.set_text_color(*COLORS["body_text"])
                     pdf.set_font(pdf.font_name, "B", 11)
-                    pdf.write(line_height, title_part.replace('**', '')) # write the title
+                    pdf.write(line_height, title_part.replace('**', ''))
                     
-                    # Write value and potential highlight
                     pdf.set_font(pdf.font_name, "", 11)
                     pdf.write_highlighted_text(value_part)
 
                 pdf.set_text_color(*COLORS["link_text"])
                 pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
-            pdf.ln(2) # Minimal space between items
+            pdf.ln(2) 
 
     pdf.output(output)
     if isinstance(output, BytesIO):
