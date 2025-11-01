@@ -20,9 +20,31 @@ EXPECTED_KEYS = [
     "key_points", "short_tricks", "must_remembers" 
 ]
 
-# NOTE: SYSTEM_PROMPT is still included here for completeness, though it is used internally by run_analysis_and_summarize
 SYSTEM_PROMPT = """
-[System prompt content remains the same, but the AI is strictly instructed in the call to NOT use markup]
+You are a master academic analyst creating a concise, hyperlinked study guide from a video transcript file. The transcript text contains timestamps in formats like (MM:SS) or [HH:MM:SS].
+
+**Primary Goal:** Create a detailed summary. For any key point you extract, you MUST find its closest preceding timestamp in the text and include it in your response as total seconds.
+
+**Instructions:**
+1.  Analyze the entire transcript.
+2.  For every piece of information you extract, find the nearest timestamp that comes *before* it in the text. Convert that timestamp into **total seconds** (e.g., (01:30) becomes 90).
+3.  Be concise. Each point must be a short, clear sentence.
+4.  Extract the information for the following categories. **Only include a category in the final JSON if the user specifically requested it.**
+5.  DO NOT use any special markdown or tags like <hl> in the final JSON content.
+
+The JSON structure must include these keys with objects/arrays:
+{
+  "main_subject": "A short phrase identifying the main subject.",
+  "topic_breakdown": [{"topic": "Topic 1", "details": [{"detail": "This is a short detail.", "time": 120}]}],
+  "key_vocabulary": [{"term": "Term 1", "definition": "A short definition.", "time": 150}],
+  "formulas_and_principles": [{"formula_or_principle": "Principle 1", "explanation": "A brief explanation.", "time": 180}],
+  "teacher_insights": [{"insight": "Short insight 1.", "time": 210}],
+  "exam_focus_points": [{"point": "Brief focus point 1.", "time": 240}],
+  "common_mistakes_explained": [{"mistake": "Mistake 1", "explanation": "A short explanation.", "time": 270}],
+  "key_points": [{"point": "A major takeaway point.", "time": 300}],
+  "short_tricks": [{"trick": "A quick method to solve a problem.", "time": 330}],
+  "must_remembers": [{"fact": "A fact that must be memorized.", "time": 360}]
+}
 """
 
 COLORS = {
@@ -44,7 +66,6 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
     
     sections_to_process = ", ".join(sections_list)
     
-    # MODIFIED PROMPT: Aggressively instruct AI to AVOID ALL MARKUP (**) and tags (<hl>)
     full_prompt = f"""
     {SYSTEM_PROMPT.replace("<hl>", "").replace("</hl>", "")}
 
@@ -65,15 +86,17 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
         time.sleep(1)
         return None, "API Key Missing", full_prompt
         
+    print("    > Sending transcript to Gemini API...")
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.5-flash') 
+        
         response = model.generate_content(full_prompt)
         
-        # ... (rest of the JSON cleaning and loading) ...
-        cleaned_response = re.sub(r'[\*\•\<\>h/l]', '', response.text) # REMOVE ALL POTENTIAL MARKUP
+        cleaned_response = clean_gemini_response(response.text)
         
         # Aggressive JSON Post-Processing/Error Handling
+        cleaned_response = re.sub(r'[\*\•\<\>h/l]', '', cleaned_response) 
         cleaned_response = cleaned_response.strip().rstrip(',').rstrip('.')
         if not cleaned_response.endswith('}'):
             last_bracket = cleaned_response.rfind('}')
@@ -87,7 +110,6 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
     except Exception as e:
         return None, f"Gemini API Error or JSON Parse Error: {e}", full_prompt
         
-# ... (inject_custom_css remains the same) ...
 def inject_custom_css():
     """Injects custom CSS for application-wide styling."""
     st.markdown(
@@ -98,7 +120,7 @@ def inject_custom_css():
             font-size: 1.05rem !important; 
         }
 
-        /* Container for raw transcript preview */
+        /* Container for raw transcript preview (no longer used, but CSS is harmless) */
         .pdf-output-text {
             border: 1px solid #ccc;
             padding: 15px;
@@ -117,7 +139,29 @@ def inject_custom_css():
         unsafe_allow_html=True
     )
     
-# ... (get_video_id, clean_gemini_response, format_timestamp, ensure_valid_youtube_url remain the same) ...
+# --------------------------------------------------------------------------
+# --- CRITICAL MISSING FUNCTION RE-ADDED ---
+# --------------------------------------------------------------------------
+
+def get_video_id(url: str) -> str | None:
+    """Extracts the YouTube video ID from a URL."""
+    patterns = [
+        r"(?<=v=)[^&#?]+", r"(?<=be/)[^&#?]+", r"(?<=live/)[^&#?]+",
+        r"(?<=embed/)[^&#?]+", r"(?<=shorts/)[^&#?]+"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match: return match.group(0)
+    return None
+
+# --------------------------------------------------------------------------
+# --- PDF/FORMATTING FUNCTIONS (Timestamp, PDF Class, save_to_pdf) ---
+# --------------------------------------------------------------------------
+
+def clean_gemini_response(response_text: str) -> str:
+    match = re.search(r'```json\s*(\{.*?\})\s*```|(\{.*?\})', response_text, re.DOTALL)
+    if match: return match.group(1) if match.group(1) else match.group(2)
+    return response_text.strip()
 
 def format_timestamp(total_seconds: int) -> str:
     """Converts total seconds to [HH:MM:SS] or [MM:SS] format."""
@@ -131,6 +175,8 @@ def format_timestamp(total_seconds: int) -> str:
     else:
         return f"[{minutes:02}:{seconds:02}]"
 
+def ensure_valid_youtube_url(video_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 # --- PDF Class ---
 class PDF(FPDF):
@@ -147,7 +193,6 @@ class PDF(FPDF):
         
         title_width = self.w - 2 * self.l_margin
         
-        # Use multi_cell for wrapping the title, ensuring it fits
         self.multi_cell(title_width, 10, title, border=0, align="C", fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         self.ln(10)
 
@@ -199,8 +244,7 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                     link = f"{base_url}&t={timestamp_sec}s"
                     detail_text = detail_item.get('detail', '')
                     
-                    # Text content without the timestamp
-                    text_content = f"    - {detail_text}" # Using a simple dash bullet
+                    text_content = f"    - {detail_text}"
                     start_y = pdf.get_y()
                     
                     pdf.set_text_color(*COLORS["body_text"])
@@ -209,34 +253,27 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                     
                     lines = pdf.y - start_y
                     
-                    # Move cursor back up and position it on the right to place the link
                     pdf.set_xy(pdf.l_margin + content_width + 5, start_y)
                     
-                    # Place the timestamp link
                     pdf.set_text_color(*COLORS["link_text"])
                     pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
                     
-                    # Reset cursor position
                     pdf.set_xy(pdf.l_margin, start_y + lines)
             
             else:
                 timestamp_sec = int(item.get('time', 0))
                 link = f"{base_url}&t={timestamp_sec}s"
                 
-                # Build the text content for non-nested items
-                text_content = ""
-                
                 start_y = pdf.get_y()
                 current_x = pdf.l_margin
                 
-                # Iterate over keys (Mistake, Explanation, Term, Definition, etc.)
                 for sk, sv in item.items():
                     if sk != 'time':
                         title = sk.replace('_', ' ').title()
                         
                         # 1. Write Title (Bold)
                         title_str = f"• {title}: "
-                        pdf.set_text_color(*COLORS["heading_text"]) # Use a darker color for the title part
+                        pdf.set_text_color(*COLORS["heading_text"]) 
                         pdf.set_font(pdf.font_name, "B", 11)
                         pdf.cell(pdf.get_string_width(title_str), line_height, title_str, new_x=XPos.CURRENT, new_y=YPos.TOP)
                         current_x += pdf.get_string_width(title_str)
@@ -244,7 +281,6 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                         # 2. Write Value (Normal, Wrapping)
                         value_str = str(sv).strip()
                         
-                        # Calculate remaining space on the current line
                         remaining_width = pdf.w - pdf.r_margin - current_x
                         
                         pdf.set_text_color(*COLORS["body_text"])
@@ -253,22 +289,15 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                         # Use multi_cell for the value to ensure wrapping
                         pdf.multi_cell(remaining_width, line_height, value_str, border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                         
-                        # After multi_cell, the cursor is at the start of the next line.
                         current_x = pdf.l_margin
                 
-                # After writing all parts of the item, place the link
-                
-                # Go back to the Y position of the final line break
                 final_y = pdf.y
                 
-                # Position the cursor for the link placement (align to the right margin)
                 pdf.set_xy(pdf.l_margin + content_width + 5, start_y)
                 
-                # Place the timestamp link (aligned to the right)
                 pdf.set_text_color(*COLORS["link_text"])
                 pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
                 
-                # Reset cursor position to the start of the next item
                 pdf.set_xy(pdf.l_margin, final_y)
                 
             pdf.ln(2) 
