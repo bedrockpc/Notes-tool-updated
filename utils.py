@@ -47,6 +47,7 @@ The JSON structure must include these keys with objects/arrays:
 }
 """
 
+# 🎨 VIBRANT AND READABLE PALETTE 🎨
 COLORS = {
     "title_bg": (65, 105, 225),   # Royal Blue
     "title_text": (255, 255, 255),
@@ -62,14 +63,20 @@ COLORS = {
 
 @st.cache_data
 def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: int, sections_list: list, user_prompt: str):
-    # ... (function body remains the same, but prompt is modified to strictly disallow markup) ...
+    """
+    Runs the full analysis using the Gemini API. 
+    Cached to prevent re-running if parameters haven't changed.
+    """
     
     sections_to_process = ", ".join(sections_list)
     
+    # CRITICAL: Clean the system prompt of markup for the LLM call
+    SYSTEM_PROMPT_CLEAN = SYSTEM_PROMPT.replace("<hl>", "").replace("</hl>", "")
+    
     full_prompt = f"""
-    {SYSTEM_PROMPT.replace("<hl>", "").replace("</hl>", "")}
+    {SYSTEM_PROMPT_CLEAN}
 
-    **CRITICAL INSTRUCTION: DO NOT USE ANY MARKUP. NO BOLDING (**), NO BULLETS (•), NO HIGHLIGHT TAGS (<hl>). PROVIDE PURE, CLEAN TEXT CONTENT IN THE JSON VALUES.**
+    **CRITICAL INSTRUCTION: PROVIDE ONLY VALID, PURE JSON. DO NOT INCLUDE ANY MARKUP OR SURROUNDING TEXT OUTSIDE THE JSON {{{{...}}}} BLOCK.**
 
     **USER CONSTRAINTS (from Streamlit app):**
     - Max Detail Length: {max_words} words.
@@ -92,23 +99,40 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
         model = genai.GenerativeModel('gemini-2.5-flash') 
         
         response = model.generate_content(full_prompt)
+        response_text = response.text
         
-        cleaned_response = clean_gemini_response(response.text)
+        # 1. Robust JSON Extraction (Fixes the delimiter error)
+        # Tries to find the entire content between the first { and the last }
+        match = re.search(r'\{.*\}', response_text.strip(), re.DOTALL)
         
-        # Aggressive JSON Post-Processing/Error Handling
-        cleaned_response = re.sub(r'[\*\•\<\>h/l]', '', cleaned_response) 
-        cleaned_response = cleaned_response.strip().rstrip(',').rstrip('.')
-        if not cleaned_response.endswith('}'):
-            last_bracket = cleaned_response.rfind('}')
-            if last_bracket != -1:
-                cleaned_response = cleaned_response[:last_bracket + 1]
+        if not match:
+            # Fallback for models that use markdown fences (```json ... ```)
+            match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        
+        if match:
+            cleaned_response = match.group(0).strip()
+            
+            # Aggressive final cleanup: remove trailing comma/period/markup characters
+            cleaned_response = re.sub(r'[\*\•\<\>h/l]', '', cleaned_response) 
+            cleaned_response = cleaned_response.rstrip(',').rstrip('.').strip()
 
+            # Ensure the structure ends with }
+            if not cleaned_response.endswith('}'):
+                cleaned_response += '}'
+        else:
+            # If no JSON structure is found, use the raw response (will lead to JSON error)
+            cleaned_response = response_text.strip() 
+
+
+        # 2. Load the JSON 
         json_data = json.loads(cleaned_response)
         
         return json_data, None, full_prompt
         
+    except json.JSONDecodeError as e:
+        return None, f"JSON PARSE ERROR: {e}", full_prompt
     except Exception as e:
-        return None, f"Gemini API Error or JSON Parse Error: {e}", full_prompt
+        return None, f"Gemini API Error: {e}", full_prompt
         
 def inject_custom_css():
     """Injects custom CSS for application-wide styling."""
@@ -120,14 +144,6 @@ def inject_custom_css():
             font-size: 1.05rem !important; 
         }
 
-        /* Container for raw transcript preview (no longer used, but CSS is harmless) */
-        .pdf-output-text {
-            border: 1px solid #ccc;
-            padding: 15px;
-            margin-top: 10px;
-            background-color: #f9f9f9;
-            --custom-font-size: 1.05rem; 
-        }
         /* Tight line spacing for preview text */
         .pdf-output-text p, .pdf-output-text div {
             font-size: var(--custom-font-size);
@@ -140,7 +156,7 @@ def inject_custom_css():
     )
     
 # --------------------------------------------------------------------------
-# --- CRITICAL MISSING FUNCTION RE-ADDED ---
+# --- CORE HELPER FUNCTIONS ---
 # --------------------------------------------------------------------------
 
 def get_video_id(url: str) -> str | None:
@@ -153,10 +169,6 @@ def get_video_id(url: str) -> str | None:
         match = re.search(pattern, url)
         if match: return match.group(0)
     return None
-
-# --------------------------------------------------------------------------
-# --- PDF/FORMATTING FUNCTIONS (Timestamp, PDF Class, save_to_pdf) ---
-# --------------------------------------------------------------------------
 
 def clean_gemini_response(response_text: str) -> str:
     match = re.search(r'```json\s*(\{.*?\})\s*```|(\{.*?\})', response_text, re.DOTALL)
@@ -286,7 +298,6 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                         pdf.set_text_color(*COLORS["body_text"])
                         pdf.set_font(pdf.font_name, "", 11)
                         
-                        # Use multi_cell for the value to ensure wrapping
                         pdf.multi_cell(remaining_width, line_height, value_str, border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                         
                         current_x = pdf.l_margin
