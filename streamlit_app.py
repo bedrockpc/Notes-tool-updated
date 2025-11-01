@@ -1,180 +1,197 @@
 import streamlit as st
-import io
-# Import the functions from the new utils.py file
-from utils import extract_text_from_pdf, inject_custom_css 
-import time # Used for placeholder delay
+from utils import inject_custom_css, get_video_id, run_analysis_and_summarize, save_to_pdf
+from pathlib import Path
+from io import BytesIO 
+import json 
+import time
 
-# Call the CSS injection function immediately upon script execution
+# Call the CSS injection function
 inject_custom_css()
 
 # --- Application Setup ---
-st.title("📄 AI-Powered PDF Analysis Tool")
+st.title("📹 AI-Powered Hyperlinked Video Notes Generator")
 
-# Initialize session state for analysis response and file name
-if 'final_llm_response' not in st.session_state:
-    st.session_state['final_llm_response'] = ""
-if 'file_name' not in st.session_state:
-    st.session_state['file_name'] = "Uploaded_Document"
+# Initialize session state variables
+if 'analysis_data' not in st.session_state:
+    st.session_state['analysis_data'] = None
+if 'api_key_valid' not in st.session_state:
+    st.session_state['api_key_valid'] = False
+if 'output_filename_base' not in st.session_state:
+    st.session_state['output_filename_base'] = "Video_Notes"
 
 
-# --- File Uploader ---
-pdf_file = st.file_uploader("Upload your PDF document", type=["pdf"])
-
-pdf_text = None
-if pdf_file:
-    with st.spinner(f'Processing and caching text from {pdf_file.name}...'):
-        # Caching function called from utils.py
-        pdf_text = extract_text_from_pdf(pdf_file)
-    st.success("PDF text successfully extracted and cached. Ready for analysis!")
-
-    
 # --------------------------------------------------------------------------
-# --- Sidebar for User Controls ---
+# --- Sidebar for User Inputs (API, URL) and Controls ---
 # --------------------------------------------------------------------------
 with st.sidebar:
+    st.header("🔑 Configuration")
+    
+    # 1. API Key Input
+    api_key = st.text_input(
+        "Gemini API Key:", 
+        type="password", 
+        help="Required to run the AI analysis."
+    )
+    if api_key:
+        st.session_state['api_key_valid'] = True
+        st.success("API Key Entered.")
+    else:
+        st.session_state['api_key_valid'] = False
+        st.warning("Please enter your Gemini API Key.")
+
+    st.markdown("---")
+
+    # 2. YouTube URL Input
+    yt_url = st.text_input(
+        "YouTube URL:",
+        help="Paste the full link to the video here."
+    )
+    video_id = get_video_id(yt_url)
+    if video_id:
+        st.success(f"Video ID found: {video_id}")
+    elif yt_url:
+        st.error("Invalid YouTube URL format.")
+    
+    st.markdown("---")
     st.header("⚙️ Analysis Controls")
 
     # A. Slider for Output Words (AI Generation Control)
     max_words = st.slider(
-        '1. Maximum AI Output Words:', 
+        '1. Max Detail Length (Word Limit):', 
         min_value=50, max_value=500, value=200, step=25,
-        help="Controls the max length of the summary the AI will generate (max_tokens)."
+        help="Controls the word limit for each detail/explanation extracted by the AI."
     )
     
     st.markdown("---")
 
     # B. Checkboxes for Section Selection
-    st.subheader("2. Select Sections to Process")
-    st.markdown("The AI will prioritize these topics for analysis:")
+    st.subheader("2. Select Output Sections")
+    st.markdown("Choose which categories you want in the final notes:")
     
-    process_intro = st.checkbox('Introduction / Executive Summary', value=True)
-    process_method = st.checkbox('Methodology / Approach', value=False)
-    process_results = st.checkbox('Results / Key Findings', value=True)
-    process_discuss = st.checkbox('Discussion / Analysis', value=False)
-    process_concl = st.checkbox('Conclusion / Summary', value=True)
-
-    sections_list = []
-    if process_intro: sections_list.append("Introduction / Executive Summary")
-    if process_method: sections_list.append("Methodology / Approach")
-    if process_results: sections_list.append("Results / Key Findings")
-    if process_discuss: sections_list.append("Discussion / Analysis")
-    if process_concl: sections_list.append("Conclusion / Summary")
-
-    st.markdown("---")
-    
-    # C. Visual Scaling Slider (for PDF display)
-    scaling_options = ['Default', 'Large', 'X-Large', 'Huge']
-    selected_scale = st.select_slider(
-        '3. Display Font Size / Scaling:',
-        options=scaling_options,
-        value='Default',
-        help="Visually scales the raw PDF text display equally."
-    )
-    
-    # Map the selected option to a CSS font-size value
-    scale_map = {
-        'Default': '1.05rem',
-        'Large': '1.2rem',
-        'X-Large': '1.35rem',
-        'Huge': '1.5rem',
+    # The full 9-section checklist based on your request
+    section_options = {
+        'Topic Breakdown': True, 
+        'Key Vocabulary': True,
+        'Formulas & Principles': True, 
+        'Teacher Insights': False, 
+        'Exam Focus Points': True, 
+        'Common Mistakes': False,
+        'Key Points': True,         # NEW
+        'Short Tricks': False,      # NEW
+        'Must Remembers': True      # NEW
     }
-    font_size_css = scale_map[selected_scale]
+    
+    sections_list = []
+    for label, default_val in section_options.items():
+        if st.checkbox(label, value=default_val):
+            sections_list.append(label)
 
     st.markdown("---")
     
-    # G. Custom Filename Input (for the download button)
-    default_name = f"AI_Analysis_of_{st.session_state['file_name'].replace('.pdf', '')}.txt"
+    # G. Custom Filename Input
+    if video_id:
+        st.session_state['output_filename_base'] = f"Notes_{video_id}"
+    
     output_filename = st.text_input(
-        "Name your analysis file:",
-        value=default_name,
+        "Name your PDF file:",
+        value=st.session_state['output_filename_base'] + ".pdf",
         key="output_filename_input"
     )
+    
+# --------------------------------------------------------------------------
+# --- Main Content: Transcript Input, Button, and Output ---
+# --------------------------------------------------------------------------
 
+st.subheader("Transcript Input")
+transcript_text = st.text_area(
+    '3. Paste the video transcript here (must include timestamps):',
+    height=300,
+    placeholder="[00:00] Welcome to the lesson. [00:45] We start with Topic A..."
+)
+
+user_prompt_input = st.text_area(
+    '4. Refine AI Focus (Optional Prompt):',
+    value="Ensure the output is highly condensed and only focus on practical applications and examples.",
+    height=100
+)
+
+# E. The Analysis Trigger Button
+can_run = transcript_text and video_id and st.session_state['api_key_valid']
+run_analysis = st.button("🚀 Generate Hyperlinked Notes (PDF)", type="primary", disabled=not can_run) 
+
+if run_analysis:
+    
+    # Run Analysis Logic
+    with st.spinner('Contacting AI, synthesizing notes, and generating JSON...'):
+        
+        # The cached function executes the full Gemini pipeline
+        data_json, error_msg, full_prompt = run_analysis_and_summarize(
+            api_key, 
+            transcript_text, 
+            max_words, 
+            sections_list, 
+            user_prompt_input
+        )
+        
+        # Save the full prompt for display/debugging
+        st.session_state['full_prompt'] = full_prompt
+        
+        if data_json:
+            st.session_state['analysis_data'] = data_json
+            st.success("Analysis Complete! Generating PDF...")
+
+            # --- PDF GENERATION ---
+            current_dir = Path(__file__).parent
+            font_path = current_dir / "fonts" 
+
+            if not font_path.exists():
+                st.error("🚨 Font folder 'fonts/' not found! PDF generation requires a 'fonts' folder containing NotoSans-*.ttf files next to app.py.")
+                st.session_state['pdf_ready'] = False
+                
+            else:
+                pdf_output = BytesIO()
+                try:
+                    save_to_pdf(data_json, video_id, font_path, pdf_output)
+                    st.session_state['pdf_buffer'] = pdf_output
+                    st.session_state['pdf_ready'] = True
+                    st.session_state['json_output'] = json.dumps(data_json, indent=2)
+                except Exception as e:
+                    st.error(f"Error during PDF generation: {e}")
+                    st.session_state['pdf_ready'] = False
+        else:
+            st.error(f"Analysis failed. Error: {error_msg}")
+            st.session_state['pdf_ready'] = False
+    
 st.markdown("---")
 
 # --------------------------------------------------------------------------
-# --- Main Content: Prompt, Button, and Output ---
+# --- Output Display and Download ---
 # --------------------------------------------------------------------------
 
-if pdf_text:
+# Display Raw Transcript Preview (using the custom CSS for line gaps and scaling)
+if transcript_text:
+    st.subheader(f"Raw Transcript Preview")
     
-    # D. Better Prompt Input
-    user_prompt_input = st.text_area(
-        '4. Refine Your Analysis Prompt:',
-        value="Summarize the key findings and the final recommendation. What is the single most important quantitative result?",
-        height=150
-    )
-    
-    # E. The Analysis Trigger Button
-    run_analysis = st.button("🚀 Run AI Analysis", type="primary") 
-    
-    if run_analysis:
-        
-        # 1. Gather all inputs (Slider, Checkboxes)
-        sections_to_process = ", ".join(sections_list)
-        
-        # 2. Define the Unified, Enhanced Prompt Template
-        better_prompt = f"""
-        **ROLE AND INSTRUCTION:**
-        You are a highly skilled **Academic/Data Analyst**. Your goal is to extract, analyze, and synthesize information strictly from the provided document text.
-
-        **CONSTRAINT:**
-        Your final output **must not exceed {max_words} words**. Maintain a professional, objective, and academic tone.
-
-        **USER FOCUS AREA:**
-        The user is specifically interested in the following document sections: **{sections_to_process}**. Use these as the primary source for your response.
-
-        **CORE TASK (User's Specific Input):**
-        **{user_prompt_input}**
-
-        **DOCUMENT TEXT FOR ANALYSIS:**
-        ---
-        {pdf_text}
-        ---
-
-        **FINAL OUTPUT FORMAT:**
-        Provide the analysis directly, without any preamble or introductory phrases.
-        """
-        
-        # 3. Add a spinner for better user experience while waiting
-        with st.spinner('Contacting AI and synthesizing response...'):
-            # --- Placeholder for LLM API call ---
-            time.sleep(4) # Simulate network/processing delay
-            llm_response = f"AI Analysis (Max Words: {max_words}, Sections: {sections_to_process}):\n\nThe most important quantitative result is the 45% increase in feature adoption found in the Results section. This strongly validates the hypothesis. The final recommendation is to proceed with deployment after fixing the minor confusion issue noted in the Discussion section. This analysis was generated strictly adhering to the {max_words}-word limit and the specific sections you selected."
-            # --- End Placeholder ---
-
-            # Save the final response to session state for the download button
-            st.session_state['final_llm_response'] = llm_response
-            
-            # Display the result to the user
-            st.success("Analysis Complete!")
-            st.markdown("### AI Analysis Result:")
-            st.info(llm_response)
-
-        st.markdown("---")
-        
-        # Optional: Show the prompt that was sent to the AI
-        st.subheader("Final Enhanced Prompt Sent to AI:")
-        st.code(better_prompt, language='markdown')
-
-
-    # F. Display the Processed PDF Text with Dynamic Scaling
-    st.subheader(f"Raw PDF Text Preview (Scaled to {selected_scale})")
-    
-    # Inject the dynamic CSS variable into the output container
+    # We don't have a specific scaling slider for the transcript preview, 
+    # but the general custom CSS for font size and line gaps is applied here.
     st.markdown(
-        f'<div class="pdf-output-text" style="--custom-font-size: {font_size_css};">{pdf_text.replace("##", "####")}</div>', 
+        f'<div class="pdf-output-text">{transcript_text}</div>', 
         unsafe_allow_html=True
     )
-    
-# --- 5. Download Button (Only visible if analysis has run) ---
-if st.session_state['final_llm_response']:
     st.markdown("---")
-    st.subheader("📥 Download Analysis")
+
+# 5. Download Button
+if st.session_state.get('pdf_ready', False):
+    st.subheader("📥 Download Hyperlinked PDF Notes")
     
     st.download_button(
-        label=f"Download '{output_filename}'",
-        data=st.session_state['final_llm_response'],
-        file_name=output_filename, # Uses the user-defined filename!
-        mime="text/plain" 
+        label=f"Download {st.session_state['output_filename_base']}.pdf",
+        data=st.session_state['pdf_buffer'],
+        file_name=output_filename, 
+        mime="application/pdf" 
     )
+
+# Optional: Show the prompt that was sent to the AI
+if st.session_state.get('full_prompt'):
+    st.subheader("Full Prompt Sent to AI (Debugging):")
+    st.code(st.session_state['full_prompt'], language='markdown')
