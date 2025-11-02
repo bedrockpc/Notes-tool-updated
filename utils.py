@@ -269,11 +269,14 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                     
                     lines = pdf.y - start_y
                     
+                    # Position the cursor for the link placement
                     pdf.set_xy(pdf.l_margin + content_width + 5, start_y)
                     
+                    # Place the timestamp link
                     pdf.set_text_color(*COLORS["link_text"])
                     pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
                     
+                    # Reset cursor position
                     pdf.set_xy(pdf.l_margin, start_y + lines)
             
             else:
@@ -281,7 +284,6 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                 link = f"{base_url}&t={timestamp_sec}s"
                 
                 start_y = pdf.get_y()
-                current_x = pdf.l_margin
                 
                 for sk, sv in item.items():
                     if sk != 'time':
@@ -291,24 +293,32 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                         title_str = f"• {title}: "
                         pdf.set_text_color(*COLORS["heading_text"]) 
                         pdf.set_font(pdf.font_name, "B", 11)
-                        # Use cell to write the bold title inline
-                        pdf.cell(pdf.get_string_width(title_str), line_height, title_str, new_x=XPos.CURRENT, new_y=YPos.TOP)
-                        current_x += pdf.get_string_width(title_str)
+                        # Use cell to write the bold title inline, forcing position to the right margin
+                        pdf.cell(pdf.get_string_width(title_str), line_height, title_str, new_x=XPos.RIGHT, new_y=YPos.TOP)
+                        
+                        # Store current X position after the title
+                        current_x_after_title = pdf.get_x()
                         
                         # 2. Write Value (Normal, Wrapping)
                         value_str = str(sv).strip()
                         
-                        remaining_width = pdf.w - pdf.r_margin - current_x
+                        # Calculate width for the value, starting from the current position
+                        value_start_x = current_x_after_title
+                        remaining_width = pdf.w - pdf.r_margin - value_start_x - 5 # 5 for a small buffer
                         
                         pdf.set_text_color(*COLORS["body_text"])
                         pdf.set_font(pdf.font_name, "", 11)
                         
+                        # Move cursor back to the position where the value should start
+                        pdf.set_xy(value_start_x, pdf.get_y())
+                        
                         # Use multi_cell for the value to ensure wrapping
                         pdf.multi_cell(remaining_width, line_height, value_str, border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                         
-                        current_x = pdf.l_margin
-                
-                final_y = pdf.y
+                        # The multi_cell completed the wrapping for this item.
+                        # We need to jump back to the start_y for placing the link.
+
+                final_y = pdf.y # The final Y position after the text wrap
                 
                 # Position the cursor for the link placement
                 pdf.set_xy(pdf.l_margin + content_width + 5, start_y)
@@ -317,7 +327,7 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                 pdf.set_text_color(*COLORS["link_text"])
                 pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
                 
-                # Reset cursor position
+                # Reset cursor position to the start of the next item
                 pdf.set_xy(pdf.l_margin, final_y)
                 
             pdf.ln(2) 
