@@ -12,7 +12,7 @@ from io import BytesIO
 import time
 from typing import Optional, Tuple, Dict, Any
 
-# --- Configuration and Constants (Omitted for brevity) ---
+# --- Configuration and Constants ---
 EXPECTED_KEYS = [
     "main_subject", "topic_breakdown", "key_vocabulary",
     "formulas_and_principles", "teacher_insights",
@@ -21,7 +21,30 @@ EXPECTED_KEYS = [
 ]
 
 SYSTEM_PROMPT = """
-[System prompt content remains the same]
+You are a master academic analyst creating a concise, hyperlinked study guide from a video transcript file. The transcript text contains timestamps in formats like (MM:SS) or [HH:MM:SS].
+
+**Primary Goal:** Create a detailed summary. For any key point you extract, you MUST find its closest preceding timestamp in the text and include it in your response as total seconds.
+
+**Instructions:**
+1.  Analyze the entire transcript.
+2.  For every piece of information you extract, find the nearest timestamp that comes *before* it in the text. Convert that timestamp into **total seconds** (e.g., (01:30) becomes 90).
+3.  Be concise. Each point must be a short, clear sentence.
+4.  Extract the information for the following categories. **Only include a category in the final JSON if the user specifically requested it.**
+5.  DO NOT use any special markdown or tags like <hl> in the final JSON content.
+
+The JSON structure must include these keys with objects/arrays:
+{
+  "main_subject": "A short phrase identifying the main subject.",
+  "topic_breakdown": [{"topic": "Topic 1", "details": [{"detail": "This is a short detail.", "time": 120}]}],
+  "key_vocabulary": [{"term": "Term 1", "definition": "A short definition.", "time": 150}],
+  "formulas_and_principles": [{"formula_or_principle": "Principle 1", "explanation": "A brief explanation.", "time": 180}],
+  "teacher_insights": [{"insight": "Short insight 1.", "time": 210}],
+  "exam_focus_points": [{"point": "Brief focus point 1.", "time": 240}],
+  "common_mistakes_explained": [{"mistake": "Mistake 1", "explanation": "A short explanation.", "time": 270}],
+  "key_points": [{"point": "A major takeaway point.", "time": 300}],
+  "short_tricks": [{"trick": "A quick method to solve a problem.", "time": 330}],
+  "must_remembers": [{"fact": "A fact that must be memorized.", "time": 360}]
+}
 """
 
 COLORS = {
@@ -36,7 +59,7 @@ COLORS = {
 }
 
 # --------------------------------------------------------------------------
-# --- STREAMLIT UTILITY FUNCTIONS (Same as last response) ---
+# --- API & JSON UTILITIES (Omitted for brevity) ---
 # --------------------------------------------------------------------------
 
 def extract_gemini_text(response) -> Optional[str]:
@@ -75,7 +98,6 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
     
     sections_to_process = ", ".join(sections_list)
     
-    # CRITICAL: Clean the system prompt of markup for the LLM call
     SYSTEM_PROMPT_CLEAN = SYSTEM_PROMPT.replace("<hl>", "").replace("</hl>", "")
     
     full_prompt = f"""
@@ -98,7 +120,6 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
         time.sleep(1)
         return None, "API Key Missing", full_prompt
         
-    print("    > Sending transcript to Gemini API...")
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name) 
@@ -128,12 +149,10 @@ def inject_custom_css():
     st.markdown(
         """
         <style>
-        /* Ensures controls and text are slightly larger */
         p, label, .stMarkdown, .stTextArea, .stSelectbox {
             font-size: 1.05rem !important; 
         }
 
-        /* Tight line spacing for preview text */
         .pdf-output-text p, .pdf-output-text div {
             font-size: var(--custom-font-size);
             line-height: 1.25;
@@ -144,10 +163,6 @@ def inject_custom_css():
         unsafe_allow_html=True
     )
     
-# --------------------------------------------------------------------------
-# --- CORE HELPER FUNCTIONS ---
-# --------------------------------------------------------------------------
-
 def get_video_id(url: str) -> str | None:
     """Extracts the YouTube video ID from a URL."""
     patterns = [
@@ -185,12 +200,11 @@ class PDF(FPDF):
         super().__init__(*args, **kwargs)
         self.font_name = "NotoSans"
         
-        # Handle missing font files gracefully
         try:
             self.add_font(self.font_name, "", str(base_path / "NotoSans-Regular.ttf"))
             self.add_font(self.font_name, "B", str(base_path / "NotoSans-Bold.ttf"))
         except RuntimeError:
-            self.font_name = "Arial" # Fallback to a common built-in font
+            self.font_name = "Arial" 
             print(f"Warning: NotoSans font files not found. Falling back to {self.font_name}.")
 
 
@@ -239,8 +253,9 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
             is_nested = isinstance(item, dict) and 'details' in item
             line_height = 6 
             
-            content_width = pdf.w - pdf.l_margin - pdf.r_margin - 35 
-            link_cell_width = 30 
+            # Width reserved for content (full width minus margins)
+            content_full_width = pdf.w - pdf.l_margin - pdf.r_margin 
+            link_cell_width = 30 # Reserved width for timestamp link (e.g., [00:00])
             
             if is_nested:
                 # 1. Write the Topic Name (Bold)
@@ -256,58 +271,65 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                     detail_text = re.sub(r'\s+', ' ', detail_item.get('detail', '')).strip()
                     text_content = f"    - {detail_text}"
                     
-                    start_y = pdf.get_y() # Y position before wrapping
+                    # Store current X, Y before wrapping
+                    start_x = pdf.get_x()
+                    start_y = pdf.get_y() 
                     
                     pdf.set_text_color(*COLORS["body_text"])
                     pdf.set_font(pdf.font_name, "", 11)
                     
-                    # Use multi_cell for the text content, allowing it to wrap fully
-                    pdf.multi_cell(content_width, line_height, text_content, border=0, new_x=XPos.RMARGIN, new_y=YPos.TOP)
+                    # Write the main text content, allowing it to wrap fully
+                    pdf.multi_cell(content_full_width - link_cell_width, line_height, text_content, border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                     
-                    final_y = pdf.get_y() # Y position after wrapping
+                    final_y = pdf.get_y() 
                     
                     # --- Link Placement ---
-                    # 1. Position the cursor for the link placement
+                    # 1. Move cursor to the right margin area at the final wrapped Y position
                     pdf.set_xy(pdf.w - pdf.r_margin - link_cell_width, final_y - line_height)
                     
                     # 2. Place the timestamp link
                     pdf.set_text_color(*COLORS["link_text"])
                     pdf.cell(link_cell_width, line_height, text=format_timestamp(timestamp_sec), link=link, align="R")
                     
-                    # 3. Reset cursor position and advance line
+                    # 3. Reset cursor position to start of the next item
                     pdf.set_xy(pdf.l_margin, final_y)
             
             else:
                 timestamp_sec = int(item.get('time', 0))
                 link = f"{base_url}&t={timestamp_sec}s"
                 
+                # Start X/Y for content placement calculation
+                start_x = pdf.get_x()
                 start_y = pdf.get_y()
                 
-                # We will write title and value sequentially, then advance the line
-                title_value_content = ""
+                # Temporarily store all content for this item
+                item_content = []
                 for sk, sv in item.items():
                     if sk != 'time':
                         title = sk.replace('_', ' ').title()
-                        
-                        # Sanitize value
                         value_str = re.sub(r'\s+', ' ', str(sv)).strip()
-                        
-                        # Build the content string with formatting applied via color/bold later
-                        title_value_content += f"• {title}: {value_str} "
+                        item_content.append((title, value_str))
                 
-                # Store the current X position to return to after link placement
-                current_x = pdf.get_x()
-
-                # --- Write Content (Wrapping) ---
-                
-                # Set color for the whole wrapping block (item title text color)
-                pdf.set_text_color(*COLORS["item_title_text"]) 
-                pdf.set_font(pdf.font_name, "B", 11)
-                
-                # Temporarily write a dummy cell to get the cursor to the correct position for wrapping
-                
-                # Use multi_cell to write the entire content string.
-                pdf.multi_cell(content_width, line_height, title_value_content.strip(), border=0, new_x=XPos.RMARGIN, new_y=YPos.TOP)
+                # 1. Write Title(s) and Value(s) sequentially using current flow
+                for title, value in item_content:
+                    
+                    # Write Title (Bold)
+                    title_str = f"• {title}: "
+                    pdf.set_text_color(*COLORS["item_title_text"]) 
+                    pdf.set_font(pdf.font_name, "B", 11)
+                    
+                    # Use cell to write title, cursor advances X
+                    pdf.cell(pdf.get_string_width(title_str), line_height, title_str, new_x=XPos.RIGHT, new_y=YPos.TOP) 
+                    
+                    # 2. Write Value (Normal, Wrapping)
+                    value_start_x = pdf.get_x()
+                    remaining_width = pdf.w - pdf.r_margin - value_start_x - 5
+                    
+                    pdf.set_text_color(*COLORS["body_text"])
+                    pdf.set_font(pdf.font_name, "", 11)
+                    
+                    # Use multi_cell for the value to ensure wrapping
+                    pdf.multi_cell(remaining_width, line_height, value_str, border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
                 
                 final_y = pdf.y # The final Y position after the text wrap
                 
@@ -319,7 +341,7 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                 pdf.set_text_color(*COLORS["link_text"])
                 pdf.cell(link_cell_width, line_height, text=format_timestamp(timestamp_sec), link=link, align="R")
                 
-                # 3. Resume the flow
+                # 3. Reset cursor position
                 pdf.set_xy(pdf.l_margin, final_y)
                 
             pdf.ln(2) 
