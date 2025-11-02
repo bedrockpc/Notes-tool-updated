@@ -25,7 +25,7 @@ if 'chunked_results' not in st.session_state:
     st.session_state['chunked_results'] = []
 if 'processing' not in st.session_state:
     st.session_state['processing'] = False
-if 'max_words_value' not in st.session_state: # CRITICAL: Initialize new default value
+if 'max_words_value' not in st.session_state:
     st.session_state['max_words_value'] = 3000 # Default for Pro model
 
 # --- 🔧 CORE HELPER FUNCTIONS ---
@@ -46,28 +46,49 @@ def split_transcript_by_parts(transcript: str, num_parts: int) -> List[str]:
     return parts
 
 def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Combines multiple JSON outputs, preserving the first main_subject and deduplicating lists."""
-    combined: Dict[str, Any] = {}
+    """
+    FIX: Combines outputs, initializing all list keys to guarantee the PDF structure.
+    This prevents iterating over empty keys later.
+    """
+    
+    # Master list of keys the PDF generator relies on (list types only)
+    LIST_KEYS = [
+        "topic_breakdown", "key_vocabulary", "formulas_and_principles", 
+        "teacher_insights", "exam_focus_points", "common_mistakes_explained", 
+        "key_points", "short_tricks", "must_remembers"
+    ]
+    
+    combined: Dict[str, Any] = {"main_subject": ""}
+    
+    # Initialize all list keys as empty lists
+    for key in LIST_KEYS:
+        combined[key] = []
+        
     for res in results:
         for k, v in res.items():
             if k == "main_subject":
+                # Take first non-empty subject
                 if not combined.get("main_subject") and v:
                     combined["main_subject"] = str(v).strip()
                 continue
 
-            if isinstance(v, list):
-                combined.setdefault(k, []).extend(v)
-                
-                # Deduplication logic (simple string comparison)
-                seen = set()
-                combined[k] = [
-                    item for item in combined[k] 
-                    if not (s := json.dumps(item, sort_keys=True) if isinstance(item, (dict, list)) else str(item)) or s not in seen and not seen.add(s)
-                ]
+            if isinstance(v, list) and k in LIST_KEYS:
+                # Append to the already initialized list
+                combined[k].extend(v)
+    
+    # Final Deduplication Logic
+    for k in LIST_KEYS:
+        if k in combined:
+            seen = set()
+            combined[k] = [
+                item for item in combined[k] 
+                if not (s := json.dumps(item, sort_keys=True) if isinstance(item, (dict, list)) else str(item)) or s not in seen and not seen.add(s)
+            ]
+            
     return combined
 
 def update_word_limit_default():
-    """CRITICAL: Sets the default max_words value based on the selected model using callback."""
+    """Sets the default max_words value based on the selected model using callback."""
     model = st.session_state.get('model_choice_select', 'gemini-2.5-pro')
     if model == "gemini-2.5-flash":
         st.session_state['max_words_value'] = 1000 # Flash default
@@ -86,8 +107,8 @@ with st.sidebar:
         "Select Gemini Model:",
         options=["gemini-2.5-pro", "gemini-2.5-flash"],
         index=0, 
-        key='model_choice_select', # CRITICAL: Assign a key
-        on_change=update_word_limit_default, # CRITICAL: Call the update function
+        key='model_choice_select', 
+        on_change=update_word_limit_default, 
         help="Pro = better reasoning, 1M token context. Flash = cheaper, faster, smaller context."
     )
     
@@ -131,13 +152,12 @@ with st.sidebar:
     else:
         st.info("Gemini 2.5 Pro handles the full transcript in one call (no manual chunking needed).")
 
-    # A. Max Detail Length (Word Limit) - Now uses session state
+    # A. Max Detail Length (Word Limit)
     st.subheader("Max Detail Length")
     max_words = st.number_input(
         'Word Limit per Note Item:', 
         min_value=50, 
         max_value=10000, 
-        # CRITICAL: Use session state for the default/current value
         value=st.session_state['max_words_value'], 
         step=50, 
         key='max_words_input', 
@@ -146,7 +166,7 @@ with st.sidebar:
     
     st.markdown("---")
 
-    # B. Checkboxes for Section Selection (omitted for brevity, assume correct configuration)
+    # B. Checkboxes for Section Selection
     section_options = {
         'Topic Breakdown': True, 'Key Vocabulary': True,
         'Formulas & Principles': True, 'Teacher Insights': False, 
@@ -179,7 +199,7 @@ with st.sidebar:
 
 st.subheader("Transcript Input")
 transcript_text = st.text_area(
-    'Paste the video transcript here (must include timestamps):',
+    '3. Paste the video transcript here (must include timestamps):',
     height=300,
     placeholder="[00:00] Welcome to the lesson. [00:45] We start with Topic A..."
 )
@@ -189,7 +209,7 @@ if len(transcript_text) > WARNING_THRESHOLD_CHARS and model_choice == "gemini-2.
     st.warning(f"⚠️ **Long Transcript Detected!** The text is over {WARNING_THRESHOLD_CHARS} characters. We recommend selecting **Gemini 2.5 Pro** or dividing the transcript into **4 or more parts** to avoid context overflow with Flash.")
 
 user_prompt_input = st.text_area(
-    'Refine AI Focus (Optional Prompt):',
+    '4. Refine AI Focus (Optional Prompt):',
     value="Ensure the output is highly condensed and only focus on practical applications and examples.",
     height=100
 )
@@ -264,6 +284,7 @@ if st.session_state['chunked_results']:
         # 3. Combine Logic
         st.subheader("Single Merged PDF")
         
+        # Merge the data using the helper function (guarantees all keys exist)
         combined_data = merge_all_json_outputs(st.session_state['chunked_results'])
         
         pdf_output = BytesIO()
