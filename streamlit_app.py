@@ -25,7 +25,8 @@ if 'chunked_results' not in st.session_state:
     st.session_state['chunked_results'] = []
 if 'processing' not in st.session_state:
     st.session_state['processing'] = False
-
+if 'max_words_value' not in st.session_state: # CRITICAL: Initialize new default value
+    st.session_state['max_words_value'] = 3000 # Default for Pro model
 
 # --- 🔧 CORE HELPER FUNCTIONS ---
 
@@ -55,21 +56,24 @@ def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
                 continue
 
             if isinstance(v, list):
-                combined.setdefault(k, [])
+                combined.setdefault(k, []).extend(v)
                 
-                for item in v:
-                    s = json.dumps(item, sort_keys=True) if isinstance(item, (dict, list)) else str(item)
-                    
-                    is_duplicate = False
-                    for existing in combined[k]:
-                        existing_s = json.dumps(existing, sort_keys=True) if isinstance(existing, (dict, list)) else str(existing)
-                        if existing_s == s:
-                            is_duplicate = True
-                            break
-                    
-                    if not is_duplicate:
-                        combined[k].append(item)
+                # Deduplication logic (simple string comparison)
+                seen = set()
+                combined[k] = [
+                    item for item in combined[k] 
+                    if not (s := json.dumps(item, sort_keys=True) if isinstance(item, (dict, list)) else str(item)) or s not in seen and not seen.add(s)
+                ]
     return combined
+
+def update_word_limit_default():
+    """CRITICAL: Sets the default max_words value based on the selected model using callback."""
+    model = st.session_state.get('model_choice_select', 'gemini-2.5-pro')
+    if model == "gemini-2.5-flash":
+        st.session_state['max_words_value'] = 1000 # Flash default
+    else: # Pro
+        st.session_state['max_words_value'] = 3000 # Pro default
+
 
 # --------------------------------------------------------------------------
 # --- Sidebar for User Inputs and Controls ---
@@ -77,11 +81,13 @@ def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 with st.sidebar:
     st.header("🔑 Configuration")
     
-    # 2. Model Selection Dropdown
+    # 2. Model Selection Dropdown (with callback)
     model_choice = st.selectbox(
         "Select Gemini Model:",
         options=["gemini-2.5-pro", "gemini-2.5-flash"],
-        index=0, # Default to Pro
+        index=0, 
+        key='model_choice_select', # CRITICAL: Assign a key
+        on_change=update_word_limit_default, # CRITICAL: Call the update function
         help="Pro = better reasoning, 1M token context. Flash = cheaper, faster, smaller context."
     )
     
@@ -113,26 +119,34 @@ with st.sidebar:
 
     if is_flash:
         st.subheader("Chunking Settings")
-        num_parts = st.selectbox(
+        num_parts = st.number_input(
             "Divide transcript into how many parts?",
-            options=[1,2,3,4,5,6,7,8,9,10],
-            index=2, # Default to 3 parts for Flash
-            key='num_parts_select',
+            min_value=1,
+            max_value=10,
+            value=3, # Default for Flash
+            step=1,
+            key='num_parts_input',
             help="Split transcript into parts before sending to Gemini Flash."
         )
     else:
         st.info("Gemini 2.5 Pro handles the full transcript in one call (no manual chunking needed).")
 
-    # A. Slider for Output Words
-    max_words = st.slider(
-        'Max Detail Length (Word Limit):', 
-        min_value=50, max_value=10000, value=200, step=50, 
+    # A. Max Detail Length (Word Limit) - Now uses session state
+    st.subheader("Max Detail Length")
+    max_words = st.number_input(
+        'Word Limit per Note Item:', 
+        min_value=50, 
+        max_value=10000, 
+        # CRITICAL: Use session state for the default/current value
+        value=st.session_state['max_words_value'], 
+        step=50, 
+        key='max_words_input', 
         help="Controls the word limit for each detail/explanation extracted by the AI."
     )
     
     st.markdown("---")
 
-    # B. Checkboxes for Section Selection
+    # B. Checkboxes for Section Selection (omitted for brevity, assume correct configuration)
     section_options = {
         'Topic Breakdown': True, 'Key Vocabulary': True,
         'Formulas & Principles': True, 'Teacher Insights': False, 
@@ -185,7 +199,7 @@ can_run = transcript_text and video_id and st.session_state['api_key_valid']
 run_analysis = st.button(
     f"🚀 Generate Notes using {model_choice}", 
     type="primary", 
-    disabled=not can_run or st.session_state['processing'] # FIX 3: Disable while processing
+    disabled=not can_run or st.session_state['processing']
 ) 
 
 if run_analysis and not st.session_state['processing']:
@@ -205,7 +219,6 @@ if run_analysis and not st.session_state['processing']:
         status_bar = st.progress(0, text="Starting analysis...")
         
         for i, part in enumerate(transcript_parts, start=1):
-            # 💡 Progress Bar Update
             status_bar.progress(
                 i / len(transcript_parts), 
                 text=f'Analyzing Part {i} of {len(transcript_parts)}... (Model: {model_choice})'
@@ -222,7 +235,7 @@ if run_analysis and not st.session_state['processing']:
                 st.session_state['chunked_results'] = []
                 break
 
-        status_bar.empty() # Clear progress bar on completion
+        status_bar.empty()
 
         if st.session_state['chunked_results']:
             st.success(f"Analysis complete for all {len(st.session_state['chunked_results'])} parts.")
@@ -231,7 +244,7 @@ if run_analysis and not st.session_state['processing']:
             st.session_state['pdf_ready'] = False
             
     finally:
-        st.session_state['processing'] = False # Ensure state is reset
+        st.session_state['processing'] = False
 
 st.markdown("---")
 
