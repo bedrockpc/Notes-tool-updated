@@ -47,8 +47,8 @@ def split_transcript_by_parts(transcript: str, num_parts: int) -> List[str]:
 
 def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    FIX: Combines outputs, initializing all list keys to guarantee the PDF structure.
-    This prevents iterating over empty keys later.
+    FINAL FIX: Combines outputs with robust merging and stable deduplication.
+    This guarantees data is preserved and prevents empty file errors.
     """
     
     # Master list of keys the PDF generator relies on (list types only)
@@ -64,26 +64,34 @@ def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     for key in LIST_KEYS:
         combined[key] = []
         
+    all_items = {} # Dictionary to hold all list items for deduplication
+        
     for res in results:
         for k, v in res.items():
             if k == "main_subject":
-                # Take first non-empty subject
                 if not combined.get("main_subject") and v:
                     combined["main_subject"] = str(v).strip()
                 continue
 
             if isinstance(v, list) and k in LIST_KEYS:
-                # Append to the already initialized list
+                # Concatenate all list items from all chunks for this key
                 combined[k].extend(v)
     
-    # Final Deduplication Logic
+    # Final Deduplication Logic (Safe and Stable)
     for k in LIST_KEYS:
-        if k in combined:
-            seen = set()
-            combined[k] = [
-                item for item in combined[k] 
-                if not (s := json.dumps(item, sort_keys=True) if isinstance(item, (dict, list)) else str(item)) or s not in seen and not seen.add(s)
-            ]
+        if combined[k]:
+            unique_items = []
+            seen_hashes = set()
+            
+            for item in combined[k]:
+                # Serialize item to a unique, hashable string for comparison
+                item_hash = json.dumps(item, sort_keys=True)
+                
+                if item_hash not in seen_hashes:
+                    unique_items.append(item)
+                    seen_hashes.add(item_hash)
+            
+            combined[k] = unique_items
             
     return combined
 
@@ -284,7 +292,6 @@ if st.session_state['chunked_results']:
         # 3. Combine Logic
         st.subheader("Single Merged PDF")
         
-        # Merge the data using the helper function (guarantees all keys exist)
         combined_data = merge_all_json_outputs(st.session_state['chunked_results'])
         
         pdf_output = BytesIO()
