@@ -1,11 +1,11 @@
-Import streamlit as st
+import streamlit as st
 from utils import inject_custom_css, get_video_id, run_analysis_and_summarize, save_to_pdf
 from pathlib import Path
 from io import BytesIO 
 import json 
 from typing import List, Dict, Any
 
-# Call the CSS injection function
+# Call the CSS injection function (for base styling, font, and layout)
 inject_custom_css()
 
 # --- Application Setup ---
@@ -47,7 +47,7 @@ def split_transcript_by_parts(transcript: str, num_parts: int) -> List[str]:
 
 def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    FINAL FIX: Combines outputs with robust merging and stable deduplication.
+    Final Merging: Combines outputs with robust merging and stable deduplication.
     This guarantees data is preserved and prevents empty file errors.
     """
     
@@ -336,5 +336,3 @@ st.markdown("---")
 
 if not st.session_state['chunked_results'] and st.session_state.get('pdf_ready'):
     st.warning("Analysis ran successfully, but no output was generated. Please verify your transcript and settings.")
-
-
