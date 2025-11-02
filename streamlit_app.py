@@ -5,9 +5,48 @@ from io import BytesIO
 import json 
 from typing import List, Dict, Any
 
-# Call the CSS injection function
+# Call the CSS injection function (for base styling)
 inject_custom_css()
 
+# -------------------------------------------------------------
+# 🔒 CSS INJECTION TO HIDE ALL STREAMLIT/GITHUB BRANDING
+# -------------------------------------------------------------
+
+hide_all_branding_style = """
+    <style>
+    /* 1. Hides the Streamlit Main Menu (three dots) */
+    #MainMenu { visibility: hidden; }
+
+    /* 2. Hides the GitHub Fork/Repo Button at the top of the app */
+    [data-testid="stToolbar"] a[href*="github.com"] {
+        display: none !important;
+        visibility: hidden;
+    }
+
+    /* 3. Hides the "Developed By" and "Hosted on Streamlit" footer links */
+    footer {
+        visibility: hidden;
+        height: 0px;
+    }
+    
+    /* 4. Hides the Header bar and any associated elements on Streamlit Cloud */
+    header { visibility: hidden; }
+
+    /* 5. Hides the GitHub repo link that appears in the sidebar/header on deployment */
+    [data-testid="stSidebarContent"] a[href*="github.com"] {
+        display: none !important;
+        visibility: hidden;
+    }
+    
+    /* 6. Hides the large Streamlit watermark/logo */
+    .stApp > header {
+        visibility: hidden;
+    }
+    </style>
+"""
+st.markdown(hide_all_branding_style, unsafe_allow_html=True) 
+
+# -------------------------------------------------------------
 # --- Application Setup ---
 st.title("📹 AI-Powered Hyperlinked Video Notes Generator")
 
