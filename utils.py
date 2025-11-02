@@ -10,6 +10,7 @@ from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 from io import BytesIO 
 import time
+from typing import Optional, Tuple, Dict, Any
 
 # --- Configuration and Constants ---
 
@@ -55,28 +56,58 @@ COLORS = {
     "link_text": (0, 150, 136),   # Bright Teal
     "body_text": (50, 50, 50),     # Dark Gray
     "line": (178, 207, 255),      # Light Blue
+    "item_title_text": (205, 92, 92), # Indian Red (For labels like "Mistake:", "Definition:")
+    "item_bullet_color": (150, 150, 150), # Medium Gray (For bullet points)
 }
 
 # --------------------------------------------------------------------------
 # --- STREAMLIT UTILITY FUNCTIONS ---
 # --------------------------------------------------------------------------
 
-@st.cache_data
-def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: int, sections_list: list, user_prompt: str):
-    """
-    Runs the full analysis using the Gemini API. 
-    Cached to prevent re-running if parameters haven't changed.
-    """
+def extract_gemini_text(response) -> Optional[str]:
+    """Safely extracts text from Gemini response object."""
+    response_text = getattr(response, "text", None)
+    if not response_text and hasattr(response, "candidates") and response.candidates:
+        try:
+            return response.candidates[0].content.parts[0].text
+        except (AttributeError, IndexError):
+            pass
+    return response_text
+
+def extract_clean_json(response_text: str) -> Optional[str]:
+    """Centralized and safer JSON extraction."""
+    match = re.search(r'\{.*\}', response_text.strip(), re.DOTALL)
+    
+    if not match:
+        match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+    
+    if match:
+        cleaned_response = match.group(0).strip()
+        
+        # Safe cleanup: only remove * and •
+        cleaned_response = re.sub(r'[*•]', '', cleaned_response) 
+        
+        # Aggressive final cleanup
+        cleaned_response = cleaned_response.rstrip(',').rstrip('.').strip()
+
+        if not cleaned_response.endswith('}'):
+            cleaned_response += '}'
+        
+        return cleaned_response
+    return None
+
+
+@st.cache_data(ttl=0) # Cache control for API calls
+def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: int, sections_list: list, user_prompt: str, model_name: str) -> Tuple[Optional[Dict[str, Any]], Optional[str], str]:
     
     sections_to_process = ", ".join(sections_list)
     
-    # CRITICAL: Clean the system prompt of markup for the LLM call
     SYSTEM_PROMPT_CLEAN = SYSTEM_PROMPT.replace("<hl>", "").replace("</hl>", "")
     
     full_prompt = f"""
     {SYSTEM_PROMPT_CLEAN}
 
-    **CRITICAL INSTRUCTION: PROVIDE ONLY VALID, PURE JSON. DO NOT INCLUDE ANY MARKUP OR SURROUNDING TEXT OUTSIDE THE JSON {{{{...}}}} BLOCK.**
+    **CRITICAL INSTRUCTION: PROVIDE ONLY VALID, PURE JSON. DO NOT INCLUDE ANY MARKUP (**), BULLETS (•), OR SURROUNDING TEXT OUTSIDE THE JSON {{{{...}}}} BLOCK. THE JSON VALUES MUST CONTAIN ONLY CLEAN TEXT.**
 
     **USER CONSTRAINTS (from Streamlit app):**
     - Max Detail Length: {max_words} words.
@@ -93,34 +124,21 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
         time.sleep(1)
         return None, "API Key Missing", full_prompt
         
-    print("    > Sending transcript to Gemini API...")
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash') 
+        model = genai.GenerativeModel(model_name) 
         
         response = model.generate_content(full_prompt)
-        response_text = response.text
-        
-        # 1. Robust JSON Extraction
-        match = re.search(r'\{.*\}', response_text.strip(), re.DOTALL)
-        
-        if not match:
-            match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-        
-        if match:
-            cleaned_response = match.group(0).strip()
-            
-            # Aggressive final cleanup: remove trailing comma/period/markup characters
-            cleaned_response = re.sub(r'[\*\•\<\>h/l]', '', cleaned_response) 
-            cleaned_response = cleaned_response.rstrip(',').rstrip('.').strip()
+        response_text = extract_gemini_text(response)
 
-            if not cleaned_response.endswith('}'):
-                cleaned_response += '}'
-        else:
-            cleaned_response = response_text.strip() 
+        if not response_text:
+            return None, "API returned empty response.", full_prompt
+        
+        cleaned_response = extract_clean_json(response_text)
 
+        if not cleaned_response:
+             return None, "JSON structure could not be extracted from API response.", full_prompt
 
-        # 2. Load the JSON 
         json_data = json.loads(cleaned_response)
         
         return json_data, None, full_prompt
@@ -135,12 +153,9 @@ def inject_custom_css():
     st.markdown(
         """
         <style>
-        /* Ensures controls and text are slightly larger */
         p, label, .stMarkdown, .stTextArea, .stSelectbox {
             font-size: 1.05rem !important; 
         }
-
-        /* Container for raw transcript preview (no longer used, but CSS is harmless) */
         .pdf-output-text {
             border: 1px solid #ccc;
             padding: 15px;
@@ -148,7 +163,6 @@ def inject_custom_css():
             background-color: #f9f9f9;
             --custom-font-size: 1.05rem; 
         }
-        /* Tight line spacing for preview text */
         .pdf-output-text p, .pdf-output-text div {
             font-size: var(--custom-font-size);
             line-height: 1.25;
@@ -160,7 +174,7 @@ def inject_custom_css():
     )
     
 # --------------------------------------------------------------------------
-# --- CORE HELPER FUNCTIONS ---
+# --- CORE HELPER FUNCTIONS (PDF/FORMATTING) ---
 # --------------------------------------------------------------------------
 
 def get_video_id(url: str) -> str | None:
@@ -173,11 +187,6 @@ def get_video_id(url: str) -> str | None:
         match = re.search(pattern, url)
         if match: return match.group(0)
     return None
-
-def clean_gemini_response(response_text: str) -> str:
-    match = re.search(r'```json\s*(\{.*?\})\s*```|(\{.*?\})', response_text, re.DOTALL)
-    if match: return match.group(1) if match.group(1) else match.group(2)
-    return response_text.strip()
 
 def format_timestamp(total_seconds: int) -> str:
     """Converts total seconds to [HH:MM:SS] or [MM:SS] format."""
@@ -199,8 +208,15 @@ class PDF(FPDF):
     def __init__(self, base_path, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.font_name = "NotoSans"
-        self.add_font(self.font_name, "", str(base_path / "NotoSans-Regular.ttf"))
-        self.add_font(self.font_name, "B", str(base_path / "NotoSans-Bold.ttf"))
+        
+        # Handle missing font files gracefully
+        try:
+            self.add_font(self.font_name, "", str(base_path / "NotoSans-Regular.ttf"))
+            self.add_font(self.font_name, "B", str(base_path / "NotoSans-Bold.ttf"))
+        except RuntimeError:
+            self.font_name = "Arial" # Fallback to a common built-in font
+            print(f"Warning: NotoSans font files not found. Falling back to {self.font_name}.")
+
 
     def create_title(self, title):
         self.set_font(self.font_name, "B", 24)
@@ -248,7 +264,8 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
             line_height = 6 
             
             content_width = pdf.w - pdf.l_margin - pdf.r_margin - 35 
-
+            link_cell_width = 30 
+            
             if is_nested:
                 # 1. Write the Topic Name (Bold)
                 pdf.set_font(pdf.font_name, "B", 11)
@@ -258,7 +275,9 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                 for detail_item in item.get('details', []):
                     timestamp_sec = int(detail_item.get('time', 0))
                     link = f"{base_url}&t={timestamp_sec}s"
-                    detail_text = detail_item.get('detail', '')
+                    
+                    # FIX 7: Sanitize text before PDF generation
+                    detail_text = re.sub(r'\s+', ' ', detail_item.get('detail', '')).strip()
                     
                     text_content = f"    - {detail_text}"
                     start_y = pdf.get_y()
@@ -267,17 +286,17 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                     pdf.set_font(pdf.font_name, "", 11)
                     pdf.multi_cell(content_width, line_height, text_content, border=0, new_x=XPos.RMARGIN, new_y=YPos.TOP)
                     
-                    lines = pdf.y - start_y
+                    final_y = pdf.get_y()
                     
                     # Position the cursor for the link placement
-                    pdf.set_xy(pdf.l_margin + content_width + 5, start_y)
+                    pdf.set_xy(pdf.w - pdf.r_margin - link_cell_width, start_y)
                     
                     # Place the timestamp link
                     pdf.set_text_color(*COLORS["link_text"])
-                    pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+                    pdf.cell(link_cell_width, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
                     
                     # Reset cursor position
-                    pdf.set_xy(pdf.l_margin, start_y + lines)
+                    pdf.set_xy(pdf.l_margin, final_y)
             
             else:
                 timestamp_sec = int(item.get('time', 0))
@@ -291,43 +310,35 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output):
                         
                         # 1. Write Title (Bold)
                         title_str = f"• {title}: "
-                        pdf.set_text_color(*COLORS["heading_text"]) 
+                        pdf.set_text_color(*COLORS["item_title_text"]) 
                         pdf.set_font(pdf.font_name, "B", 11)
-                        # Use cell to write the bold title inline, forcing position to the right margin
-                        pdf.cell(pdf.get_string_width(title_str), line_height, title_str, new_x=XPos.RIGHT, new_y=YPos.TOP)
-                        
-                        # Store current X position after the title
-                        current_x_after_title = pdf.get_x()
+                        pdf.cell(pdf.get_string_width(title_str), line_height, title_str, new_x=XPos.CURRENT, new_y=YPos.TOP)
                         
                         # 2. Write Value (Normal, Wrapping)
-                        value_str = str(sv).strip()
+                        # FIX 7: Sanitize text before PDF generation
+                        value_str = re.sub(r'\s+', ' ', str(sv)).strip()
                         
-                        # Calculate width for the value, starting from the current position
-                        value_start_x = current_x_after_title
-                        remaining_width = pdf.w - pdf.r_margin - value_start_x - 5 # 5 for a small buffer
+                        value_start_x = pdf.get_x()
+                        remaining_width = pdf.w - pdf.r_margin - value_start_x - 5
                         
                         pdf.set_text_color(*COLORS["body_text"])
                         pdf.set_font(pdf.font_name, "", 11)
                         
-                        # Move cursor back to the position where the value should start
                         pdf.set_xy(value_start_x, pdf.get_y())
                         
                         # Use multi_cell for the value to ensure wrapping
                         pdf.multi_cell(remaining_width, line_height, value_str, border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-                        
-                        # The multi_cell completed the wrapping for this item.
-                        # We need to jump back to the start_y for placing the link.
-
-                final_y = pdf.y # The final Y position after the text wrap
+                
+                final_y = pdf.y
                 
                 # Position the cursor for the link placement
                 pdf.set_xy(pdf.l_margin + content_width + 5, start_y)
                 
                 # Place the timestamp link
                 pdf.set_text_color(*COLORS["link_text"])
-                pdf.cell(0, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+                pdf.cell(link_cell_width, line_height, text=format_timestamp(timestamp_sec), link=link, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
                 
-                # Reset cursor position to the start of the next item
+                # Reset cursor position
                 pdf.set_xy(pdf.l_margin, final_y)
                 
             pdf.ln(2) 
