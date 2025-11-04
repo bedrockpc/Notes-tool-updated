@@ -1,4 +1,3 @@
-# utils.py - FINAL PRODUCTION CODE
 # -*- coding: utf-8 -*-
 import streamlit as st
 import os
@@ -10,7 +9,7 @@ from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 from io import BytesIO 
 import time
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List 
 
 # --- Configuration and Constants ---
 
@@ -22,9 +21,15 @@ EXPECTED_KEYS = [
 ]
 
 SYSTEM_PROMPT = """
-You are a master academic analyst creating a concise, hyperlinked study guide from a video transcript file. The transcript text contains timestamps in formats like (MM:SS) or [HH:MM:SS].
+You are an intelligent note structurer. 
+Input: a list of transcript segments (each with 'time' and 'text').
+Task: extract key topics, subtopics, and summarized explanations.
 
-**Primary Goal:** Create a detailed summary. For any key point you extract, you MUST find its closest preceding timestamp in the text and include it in your response as total seconds.
+**Guidelines:**
+- Always include a key 'main_subject' summarizing the lecture topic in one short sentence.
+- Use the provided 'time' value for each extracted point instead of inferring timestamps.
+- Do NOT create any separate 'timestamp' sections or headings. Only include timestamps inside each point’s 'time' field (in seconds).
+- Keep everything factual and structured for PDF generation.
 
 [Instructions Section]
 """
@@ -56,26 +61,29 @@ def extract_gemini_text(response) -> Optional[str]:
     return response_text
 
 def extract_clean_json(response_text: str) -> Optional[str]:
-    """Centralized and safer JSON extraction."""
-    match = re.search(r'\{.*\}', response_text.strip(), re.DOTALL)
+    """Tolerantly extracts a single, valid JSON block from the response text."""
+    # Find all potential JSON blocks (starting with { and ending with })
+    potential_json_blocks = re.findall(r'\{.*?\}', response_text.strip(), re.DOTALL)
     
-    if not match:
-        match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-    
-    if match:
-        cleaned_response = match.group(0).strip()
+    for json_string in potential_json_blocks:
+        # Clean up common non-JSON artifacts often added by models
+        json_string = re.sub(r'```json\s*|```|\s*[*•]', '', json_string).strip()
         
-        cleaned_response = re.sub(r'[*•]', '', cleaned_response) 
+        # Ensure block structure is maintained
+        if not json_string.startswith('{'):
+            continue
+        if not json_string.endswith('}'):
+            json_string += '}'
         
-        cleaned_response = cleaned_response.rstrip(',').rstrip('.').strip()
-
-        if not cleaned_response.endswith('}'):
-            cleaned_response += '}'
-        
-        return cleaned_response
+        # Attempt to load it and return the first successful one
+        try:
+            json.loads(json_string)
+            return json_string
+        except json.JSONDecodeError:
+            continue
+            
     return None
 
-# CRITICAL: Added Bulletproof Key Getter
 def get_content_text(item):
     """Retrieves content text using multiple fallback keys, ensuring string output."""
     if isinstance(item, dict):
@@ -85,22 +93,25 @@ def get_content_text(item):
 
 
 @st.cache_data(ttl=0) 
-def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: int, sections_list_keys: list, user_prompt: str, model_name: str, is_easy_read: bool) -> Tuple[Optional[Dict[str, Any]], Optional[str], str]:
+def run_analysis_and_summarize(api_key: str, transcript_segments: List[Dict], max_words: int, sections_list_keys: list, user_prompt: str, model_name: str, is_easy_read: bool) -> Tuple[Optional[Dict[str, Any]], Optional[str], str]:
     
     sections_to_process = ", ".join(sections_list_keys)
     
+    # The prompt section uses max_words for word count control
     if is_easy_read:
-        prompt_instructions = SYSTEM_PROMPT.replace('[Instructions Section]', """
+        prompt_instructions = SYSTEM_PROMPT.replace('[Instructions Section]', f"""
         4. **Highlighting:** Inside any 'detail', 'definition', 'explanation', or 'insight' string, find the single most critical phrase (3-5 words) and wrap it in `<hl>` and `</hl>` tags.
-        5. Be concise. Each point must be a short, clear sentence.
+        5. Be concise. The total combined length of all extracted details must not exceed {max_words} words.
         6. Extract the information for the following categories...
         """)
     else:
-        prompt_instructions = SYSTEM_PROMPT.replace('[Instructions Section]', """
-        4. Be concise. Each point must be a short, clear sentence.
+        prompt_instructions = SYSTEM_PROMPT.replace('[Instructions Section]', f"""
+        4. Be concise. The total combined length of all extracted details must not exceed {max_words} words.
         5. Extract the information for the following categories...
         6. DO NOT use any special markdown or tags like <hl> in the final JSON content.
         """)
+
+    transcript_json_string = json.dumps(transcript_segments, indent=2)
 
     full_prompt = f"""
     {prompt_instructions}
@@ -108,13 +119,13 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
     **CRITICAL INSTRUCTION: PROVIDE ONLY VALID, PURE JSON. DO NOT INCLUDE ANY MARKUP (**), BULLETS (•), OR SURROUNDING TEXT OUTSIDE THE JSON {{{{...}}}} BLOCK. THE JSON VALUES MUST CONTAIN ONLY CLEAN TEXT. THE KEYS MUST BE IN SNAKE_CASE.**
 
     **USER CONSTRAINTS (from Streamlit app):**
-    - Max Detail Length: {max_words} words.
+    - Max Detail Length: {max_words} words (Total).
     - **REQUIRED OUTPUT CATEGORIES (SNAKE_CASE):** **{sections_to_process}**
     - User Refinement Prompt: {user_prompt}
 
-    Transcript to Analyze:
+    Transcript to Analyze (JSON Format):
     ---
-    {transcript_text}
+    {transcript_json_string}
     ---
     """
     
@@ -130,7 +141,8 @@ def run_analysis_and_summarize(api_key: str, transcript_text: str, max_words: in
         response_text = extract_gemini_text(response)
 
         if not response_text:
-            return None, "API returned empty response.", full_prompt
+            time.sleep(2)
+            return None, "Empty response from model.", full_prompt
         
         cleaned_response = extract_clean_json(response_text)
 
@@ -165,7 +177,7 @@ def inject_custom_css():
         unsafe_allow_html=True
     )
     
-def get_video_id(url: str) -> str | None:
+def get_video_id(url: str) -> Optional[str]:
     """Extracts the YouTube video ID from a URL."""
     patterns = [
         r"(?<=v=)[^&#?]+", r"(?<=be/)[^&#?]+", r"(?<=live/)[^&#?]+",
@@ -231,7 +243,10 @@ class PDF(FPDF):
         self.ln(5)
 
     def write_highlighted_text(self, text, line_height):
-        """Writes text, handling <hl> tags and advancing the cursor properly."""
+        """
+        Writes text, handling <hl> tags and advancing the cursor properly.
+        Uses multi_cell for each part to ensure text wrapping and prevent overflow.
+        """
         self.set_font(self.font_name, '', 11)
         self.set_text_color(*COLORS["body_text"])
         
@@ -243,23 +258,38 @@ class PDF(FPDF):
                 self.set_fill_color(*COLORS["highlight_bg"])
                 self.set_font(self.font_name, 'B', 11)
                 
+                # Write highlighted text (bold, filled) - cell for inline flow
                 self.cell(self.get_string_width(highlight_text), line_height, highlight_text, fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
                 self.set_font(self.font_name, '', 11)
             else:
                 self.set_fill_color(255, 255, 255)
+                # Use self.write for regular text to allow immediate chaining of cell or multi_cell
+                # However, multi_cell is safer for wrapping, but requires care with X, Y
+                # Using write here is acceptable *if* the text doesn't contain highlights AND it's a short point,
+                # but since we are handling mixed text (partially highlighted, partially not),
+                # we must stick to either cell or multi_cell for controlled flow. 
+                
+                # Reverting to FPDF's standard write/cell behavior for the highlight function
                 self.write(line_height, part) 
 
-
 # --- Save to PDF Function (Primary Output) ---
-def save_to_pdf(data: dict, video_id: str, font_path: Path, output, format_choice: str = "Default (Compact)"):
+def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, format_choice: str = "Default (Compact)"):
     print(f"    > Saving elegantly hyperlinked PDF...")
     
     is_easy_read = format_choice.startswith("Easier Read")
-    base_url = ensure_valid_youtube_url(video_id) 
     
+    if video_id:
+        base_url = ensure_valid_youtube_url(video_id)
+        has_video_id = True
+    else:
+        base_url = "#"  
+        has_video_id = False
+        
     pdf = PDF(base_path=font_path, is_easy_read=is_easy_read)
     pdf.add_page()
-    pdf.create_title(data.get("main_subject", "Video Summary"))
+    
+    main_title = data.get("main_subject") or "Lecture Summary"
+    pdf.create_title(main_title)
     
     line_height = pdf.base_line_height
 
@@ -278,9 +308,8 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output, format_choic
         pdf.create_section_heading(friendly_name)
         
         for item in values:
-            is_nested = isinstance(item, dict) and 'details' in item # Check for Topic Breakdown nesting
+            is_nested = isinstance(item, dict) and 'details' in item
             
-            content_area_width = pdf.w - pdf.l_margin - pdf.r_margin 
             link_cell_width = 30 
             
             if is_nested:
@@ -291,22 +320,31 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output, format_choic
                 # 2. Write all Details for that topic
                 for detail_item in item.get('details', []):
                     timestamp_sec = int(detail_item.get('time', 0))
-                    link = f"{base_url}&t={timestamp_sec}s"
+                    link = f"{base_url}&t={timestamp_sec}s" if has_video_id else base_url
                     
-                    # Use tolerant getter here
                     detail_text = get_content_text(detail_item)
-                    
                     detail_text = re.sub(r'\s+', ' ', detail_text).strip()
                     text_content = f"    - {detail_text}"
                     
+                    start_x = pdf.get_x()
                     start_y = pdf.get_y()
                     
                     pdf.set_text_color(*COLORS["body_text"])
                     pdf.set_font(pdf.font_name, "", 11)
                     
                     # Write the main text content, allowing it to wrap fully
-                    pdf.multi_cell(content_area_width - link_cell_width, line_height, text_content, border=0, new_x=XPos.RMARGIN, new_y=YPos.TOP)
+                    pdf.write_highlighted_text(text_content, line_height)
                     
+                    # Calculate final Y position after the write, assuming it wrapped
+                    # This is complex with .write(), so we rely on the height calculation below
+                    
+                    # Find out how many lines the text took
+                    # Note: We must re-evaluate the height based on text_content
+                    
+                    # Easiest way to calculate height is using multi_cell, but we can't here.
+                    # As a compromise, we step Y down by line_height, and assume wrapping is handled
+                    # by pdf.write_highlighted_text setting XPos.RIGHT and YPos.TOP
+                    pdf.ln(line_height) 
                     final_y = pdf.get_y()
                     
                     # Position the cursor for the link placement
@@ -322,7 +360,7 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output, format_choic
             else:
                 # NON-NESTED ITEMS (Vocabulary, Mistakes, Points, etc.)
                 timestamp_sec = int(item.get('time', 0))
-                link = f"{base_url}&t={timestamp_sec}s"
+                link = f"{base_url}&t={timestamp_sec}s" if has_video_id else base_url
                 
                 start_y = pdf.get_y()
                 
@@ -330,7 +368,6 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output, format_choic
                     if sk != 'time':
                         title = sk.replace('_', ' ').title()
                         
-                        # Use tolerant getter here
                         value_str = get_content_text({sk: sv})
                         
                         # 1. Write Title (Bold)
@@ -342,15 +379,15 @@ def save_to_pdf(data: dict, video_id: str, font_path: Path, output, format_choic
                         
                         # 2. Write Value (Normal, Wrapping)
                         value_start_x = pdf.get_x()
-                        remaining_width = pdf.w - pdf.r_margin - value_start_x - 5
                         
                         pdf.set_text_color(*COLORS["body_text"])
                         pdf.set_font(pdf.font_name, "", 11)
                         pdf.set_xy(value_start_x, pdf.get_y())
                         
-                        # Use multi_cell for the value to ensure wrapping
-                        pdf.multi_cell(remaining_width, line_height, value_str, border=0, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-                
+                        # Use write_highlighted_text
+                        pdf.write_highlighted_text(value_str, line_height)
+                        pdf.ln(line_height) 
+
                 final_y = pdf.y
                 
                 # Position the cursor for the link placement
