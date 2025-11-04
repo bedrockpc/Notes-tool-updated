@@ -20,7 +20,7 @@ EXPECTED_KEYS = [
     "key_points", "short_tricks", "must_remembers" 
 ]
 
-# 🎯 FINAL FIX: Replaced the vague structure with the explicit, successful blueprint.
+# 🎯 FINAL FIX: Explicit Blueprint SYSTEM_PROMPT to force content generation (solves empty lists)
 SYSTEM_PROMPT = """
 You are a master academic analyst creating a concise, structured study guide.
 Input: a list of transcript segments (each with 'time' and 'text').
@@ -56,8 +56,38 @@ COLORS = {
     "highlight_bg": (255, 255, 0)
 }
 
-# --- Helper Functions ---
-# ... [get_video_id, clean_gemini_response, format_timestamp, ensure_valid_youtube_url remain unchanged] ...
+# --- CORE UTILITY FUNCTIONS (Ensuring all are defined for import) ---
+
+# FIX: Function definition added to solve ImportError
+def inject_custom_css():
+    """Injects custom CSS for application-wide styling."""
+    st.markdown(
+        """
+        <style>
+        p, label, .stMarkdown, .stTextArea, .stSelectbox {
+            font-size: 1.05rem !important; 
+        }
+
+        .pdf-output-text p, .pdf-output-text div {
+            font-size: var(--custom-font-size);
+            line-height: 1.25;
+            margin-bottom: 0.2em;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    
+def get_video_id(url: str) -> Optional[str]:
+    """Extracts the YouTube video ID from a URL."""
+    patterns = [
+        r"(?<=v=)[^&#?]+", r"(?<=be/)[^&#?]+", r"(?<=live/)[^&#?]+",
+        r"(?<=embed/)[^&#?]+", r"(?<=shorts/)[^&#?]+"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match: return match.group(0)
+    return None
 
 def extract_gemini_text(response) -> Optional[str]:
     """Safely extracts text from Gemini response object."""
@@ -95,6 +125,22 @@ def get_content_text(item):
         text = item.get('detail') or item.get('explanation') or item.get('point') or item.get('text') or item.get('definition') or item.get('formula_or_principle') or item.get('insight') or item.get('mistake') or item.get('trick') or item.get('fact') or item.get('content')
         return str(text or '')
     return str(item or '')
+
+def format_timestamp(seconds: int) -> str:
+    """Converts total seconds to [MM:SS] or [HH:MM:SS] format."""
+    total_seconds = int(seconds)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    
+    if hours > 0:
+        return f"[{hours:02}:{minutes:02}:{seconds:02}]"
+    else:
+        return f"[{minutes:02}:{seconds:02}]"
+
+def ensure_valid_youtube_url(video_id: str) -> str:
+    """Returns a properly formatted YouTube base URL for hyperlinking."""
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 
 @st.cache_data(ttl=0) 
@@ -155,7 +201,7 @@ def run_analysis_and_summarize(api_key: str, transcript_segments: List[Dict], ma
 
         json_data = json.loads(cleaned_response)
         
-        # ✅ FINAL FIX: Normalize keys from camelCase/PascalCase to snake_case (Kept for robustness)
+        # ✅ FIX: Normalize keys from camelCase/PascalCase to snake_case (Crucial for list matching)
         json_data = {re.sub(r'([A-Z])', lambda m: '_' + m.group(1).lower(), k).lstrip('_'): v for k, v in json_data.items()}
         
         return json_data, None, full_prompt
@@ -209,15 +255,13 @@ class PDF(FPDF):
         self.ln()
 
 # --- Save to PDF Function (Primary Output) ---
-# Note: Using the simplified, corrected function structure requested previously.
-def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output):
+def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, format_choice: str = "Default (Compact)"):
     
     print("PDF INPUT DEBUG:", json.dumps(data, indent=2)[:1000] + "...")
     
     base_url = ensure_valid_youtube_url(video_id) if video_id else "#"
-    line_height = 7 # Default line height from previous code
+    line_height = 7 
     
-    # Use generic FPDF initialization for compatibility with existing PDF writing methods
     pdf = PDF(font_path=font_path)
     pdf.add_page()
     
@@ -240,6 +284,7 @@ def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output):
         pdf.create_section_heading(heading)
         
         for item in section_content:
+            # We use get_content_text to find the main text content for non-nested items
             content_text = get_content_text(item)
             if not content_text.strip():
                 continue
