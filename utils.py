@@ -52,6 +52,7 @@ COLORS = {
 
 def extract_gemini_text(response) -> Optional[str]:
     """Safely extracts text from Gemini response object."""
+    # FIX 1: Print response text before parsing (added in app.py for Streamlit display)
     response_text = getattr(response, "text", None)
     if not response_text and hasattr(response, "candidates") and response.candidates:
         try:
@@ -62,20 +63,16 @@ def extract_gemini_text(response) -> Optional[str]:
 
 def extract_clean_json(response_text: str) -> Optional[str]:
     """Tolerantly extracts a single, valid JSON block from the response text."""
-    # Find all potential JSON blocks (starting with { and ending with })
     potential_json_blocks = re.findall(r'\{.*?\}', response_text.strip(), re.DOTALL)
     
     for json_string in potential_json_blocks:
-        # Clean up common non-JSON artifacts often added by models
         json_string = re.sub(r'```json\s*|```|\s*[*•]', '', json_string).strip()
         
-        # Ensure block structure is maintained
         if not json_string.startswith('{'):
             continue
         if not json_string.endswith('}'):
             json_string += '}'
         
-        # Attempt to load it and return the first successful one
         try:
             json.loads(json_string)
             return json_string
@@ -97,7 +94,6 @@ def run_analysis_and_summarize(api_key: str, transcript_segments: List[Dict], ma
     
     sections_to_process = ", ".join(sections_list_keys)
     
-    # The prompt section uses max_words for word count control
     if is_easy_read:
         prompt_instructions = SYSTEM_PROMPT.replace('[Instructions Section]', f"""
         4. **Highlighting:** Inside any 'detail', 'definition', 'explanation', or 'insight' string, find the single most critical phrase (3-5 words) and wrap it in `<hl>` and `</hl>` tags.
@@ -150,6 +146,9 @@ def run_analysis_and_summarize(api_key: str, transcript_segments: List[Dict], ma
             return None, "JSON structure could not be extracted from API response.", full_prompt
 
         json_data = json.loads(cleaned_response)
+        
+        # ✅ PERMANENT FIX: Normalize keys from camelCase/PascalCase to snake_case
+        json_data = {re.sub(r'([A-Z])', lambda m: '_' + m.group(1).lower(), k).lstrip('_'): v for k, v in json_data.items()}
         
         return json_data, None, full_prompt
         
@@ -245,7 +244,6 @@ class PDF(FPDF):
     def write_highlighted_text(self, text, line_height):
         """
         Writes text, handling <hl> tags and advancing the cursor properly.
-        Uses multi_cell for each part to ensure text wrapping and prevent overflow.
         """
         self.set_font(self.font_name, '', 11)
         self.set_text_color(*COLORS["body_text"])
@@ -258,23 +256,17 @@ class PDF(FPDF):
                 self.set_fill_color(*COLORS["highlight_bg"])
                 self.set_font(self.font_name, 'B', 11)
                 
-                # Write highlighted text (bold, filled) - cell for inline flow
                 self.cell(self.get_string_width(highlight_text), line_height, highlight_text, fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
                 self.set_font(self.font_name, '', 11)
             else:
                 self.set_fill_color(255, 255, 255)
-                # Use self.write for regular text to allow immediate chaining of cell or multi_cell
-                # However, multi_cell is safer for wrapping, but requires care with X, Y
-                # Using write here is acceptable *if* the text doesn't contain highlights AND it's a short point,
-                # but since we are handling mixed text (partially highlighted, partially not),
-                # we must stick to either cell or multi_cell for controlled flow. 
-                
-                # Reverting to FPDF's standard write/cell behavior for the highlight function
                 self.write(line_height, part) 
 
 # --- Save to PDF Function (Primary Output) ---
 def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, format_choice: str = "Default (Compact)"):
-    print(f"    > Saving elegantly hyperlinked PDF...")
+    
+    # 🧠 DEBUG 5: Print data before calling
+    print("PDF INPUT DEBUG:", json.dumps(data, indent=2)[:1000] + "...")
     
     is_easy_read = format_choice.startswith("Easier Read")
     
@@ -302,6 +294,10 @@ def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, fo
 
     for friendly_name, json_key in key_mapping.items():
         values = data.get(json_key)
+        
+        # 🧠 DEBUG 5: Print each friendly_name and len(values)
+        print(f"  > Processing '{friendly_name}' ({json_key}): {len(values) if isinstance(values, list) else values}")
+        
         if not values:
             continue
             
@@ -332,18 +328,8 @@ def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, fo
                     pdf.set_text_color(*COLORS["body_text"])
                     pdf.set_font(pdf.font_name, "", 11)
                     
-                    # Write the main text content, allowing it to wrap fully
                     pdf.write_highlighted_text(text_content, line_height)
                     
-                    # Calculate final Y position after the write, assuming it wrapped
-                    # This is complex with .write(), so we rely on the height calculation below
-                    
-                    # Find out how many lines the text took
-                    # Note: We must re-evaluate the height based on text_content
-                    
-                    # Easiest way to calculate height is using multi_cell, but we can't here.
-                    # As a compromise, we step Y down by line_height, and assume wrapping is handled
-                    # by pdf.write_highlighted_text setting XPos.RIGHT and YPos.TOP
                     pdf.ln(line_height) 
                     final_y = pdf.get_y()
                     
