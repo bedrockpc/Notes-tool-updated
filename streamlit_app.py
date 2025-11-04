@@ -8,9 +8,9 @@ from typing import List, Dict, Any
 # Call the CSS injection function (for base styling)
 inject_custom_css()
 
-# --- Configuration and Mapping (FIX 1) ---
+# --- Configuration and Mapping ---
 
-# Mapping friendly label -> expected JSON key
+# Mapping friendly label -> expected JSON key (Used to fix the API prompt and merge logic)
 LABEL_TO_KEY = {
     'Topic Breakdown': 'topic_breakdown',
     'Key Vocabulary': 'key_vocabulary',
@@ -60,36 +60,20 @@ def split_transcript_by_parts(transcript: str, num_parts: int) -> List[str]:
         parts.append(text[start:end])
     return parts
 
-def normalize_result_keys(res: Dict[str, Any]) -> Dict[str, Any]:
-    """FIX 2: Normalizes keys from Title Case labels to snake_case JSON keys."""
-    normalized = {}
-    for k, v in res.items():
-        # Check if the key is a Title Case label we need to map
-        if k in LABEL_TO_KEY:
-            normalized_key = LABEL_TO_KEY[k]
-        else:
-            # Assume other keys (like main_subject) are already correct or don't need mapping
-            normalized_key = k
-        normalized[normalized_key] = v
-    return normalized
-
 def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Combines outputs with robust merging and stable deduplication."""
-    
-    # Master list of keys the PDF generator relies on (snake_case)
     LIST_KEYS = list(LABEL_TO_KEY.values())
     
     combined: Dict[str, Any] = {"main_subject": ""}
     
-    # Initialize all list keys as empty lists
     for key in LIST_KEYS:
         combined[key] = []
         
     for res in results:
-        # CRITICAL FIX: Normalize keys before processing the content
-        res = normalize_result_keys(res) 
-
-        for k, v in res.items():
+        # Normalize keys before merging to ensure structure is correct
+        res_normalized = {LABEL_TO_KEY.get(k, k): v for k, v in res.items()}
+        
+        for k, v in res_normalized.items():
             if k == "main_subject":
                 if not combined.get("main_subject") and v:
                     combined["main_subject"] = str(v).strip()
@@ -225,7 +209,7 @@ with st.sidebar:
 # --- Main Content: Transcript Input, Button, and Output ---
 # --------------------------------------------------------------------------
 
-# 💡 NEW: Format Selection Radio Button (Integrated Dual Format)
+# 💡 Dual Format Selection Radio Button
 format_choice = st.radio(
     "Choose Reading Format:",
     options=["Default (Compact)", "Easier Read (Spacious & Highlighted)"],
@@ -294,9 +278,6 @@ if run_analysis and not st.session_state['processing']:
             )
             
             if data_json:
-                # DEBUG: Added diagnostic print
-                print(f"DEBUG: Part {i} returned keys:", list(data_json.keys()))
-                print(json.dumps(data_json, indent=2)[:2000])
                 st.session_state['chunked_results'].append(data_json)
             else:
                 st.error(f"Analysis failed for Part {i}. Error: {error_msg}")
@@ -334,9 +315,6 @@ if st.session_state['chunked_results']:
         st.subheader("Single Merged PDF")
         
         combined_data = merge_all_json_outputs(st.session_state['chunked_results'])
-        
-        # DEBUG: Added diagnostic print for final merge keys
-        print("DEBUG: combined_data keys:", list(combined_data.keys()))
         
         pdf_output = BytesIO()
         try:
