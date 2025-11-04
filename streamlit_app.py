@@ -473,6 +473,7 @@ if st.session_state['chunked_results']:
                 st.download_button(
                     label=f"⬇️ Download Part {i}",
                     data=pdf_output,
+                    # FIX: Corrected incomplete file_name string
                     file_name=f"{output_filename_base}_part{i}.pdf",
                     mime="application/pdf",
                     key=f'download_part_{i}'
