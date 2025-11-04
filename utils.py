@@ -308,7 +308,7 @@ Now provide the JSON output with actual content extracted from the transcript ab
         return None, f"Gemini API Error: {e}", full_prompt
 
 
-# --- PDF Class with Fixed Layout Management ---
+# --- PDF Class with Proper Inline Text Flow ---
 class PDF(FPDF):
     def __init__(self, font_path, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -320,18 +320,18 @@ class PDF(FPDF):
             self.font_name = "Arial"
 
     def create_title(self, title):
-        """Creates title with proper spacing and no clipping."""
-        self.ln(15)  # Space from top
+        """Creates title with proper spacing."""
+        self.ln(10)
         self.set_font(self.font_name, "B", 26)
         self.set_fill_color(*COLORS["title_bg"])
         self.set_text_color(*COLORS["title_text"])
         self.cell(0, 28, title, align="C", fill=True)
-        self.ln(18)  # Space after title
-        self.set_text_color(*COLORS["body_text"])  # Reset text color
+        self.ln(12)
+        self.set_text_color(*COLORS["body_text"])
 
     def create_section_heading(self, heading, section_key):
-        """Creates colored section heading with proper spacing."""
-        self.ln(8)  # Space before heading
+        """Creates colored section heading."""
+        self.ln(6)
         
         # Get section-specific colors
         bg_key = f"{section_key}_bg"
@@ -343,63 +343,46 @@ class PDF(FPDF):
         self.set_fill_color(*bg_color)
         self.set_text_color(*text_color)
         self.cell(0, 10, heading, fill=True)
-        self.ln(8)  # Space after heading
+        self.ln(6)
         
         # Reset colors
         self.set_fill_color(255, 255, 255)
         self.set_text_color(*COLORS["body_text"])
 
-    def write_text_with_highlights(self, text):
-        """Writes text with inline highlights, proper wrapping."""
+    def write_inline_with_highlights(self, text, line_height=6):
+        """
+        Writes text inline with highlights using write() for proper flow.
+        This is the KEY fix - using write() instead of multi_cell().
+        """
         parts = re.split(r'(<hl>.*?</hl>)', text)
         
         self.set_font(self.font_name, '', 11)
         self.set_text_color(*COLORS["body_text"])
+        self.set_fill_color(255, 255, 255)
         
         for part in parts:
             if part.startswith('<hl>'):
-                # Highlighted portion
+                # Highlighted portion - use write() with fill
                 highlight_text = part[4:-5]
                 self.set_fill_color(*COLORS["highlight_bg"])
                 self.set_text_color(*COLORS["highlight_text"])
                 self.set_font(self.font_name, 'B', 11)
                 
-                # Use multi_cell for proper wrapping
-                self.multi_cell(0, 6, highlight_text, fill=True)
+                # Calculate width for the cell to maintain inline flow
+                text_width = self.get_string_width(highlight_text) + 2
+                self.cell(text_width, line_height, highlight_text, fill=True)
                 
                 # Reset after highlight
                 self.set_fill_color(255, 255, 255)
                 self.set_text_color(*COLORS["body_text"])
                 self.set_font(self.font_name, '', 11)
             else:
-                # Normal text
+                # Normal text - use write() for inline flow
                 if part.strip():
-                    self.multi_cell(0, 6, part)
+                    self.write(line_height, part)
         
-        self.ln(2)  # Small space after text block
-
-    def add_timestamp_link(self, timestamp, video_id, base_url):
-        """Adds timestamp link on same line as last text, right-aligned."""
-        if timestamp and video_id:
-            link_url = f"{base_url}&t={timestamp}s"
-            
-            # Save current Y position
-            current_y = self.get_y()
-            
-            # Move to right side for timestamp
-            self.set_xy(self.w - self.r_margin - 35, current_y - 6)
-            
-            # Write timestamp link
-            self.set_text_color(*COLORS["link_text"])
-            self.set_font(self.font_name, 'B', 9)
-            self.cell(35, 6, format_timestamp(int(timestamp)), link=link_url, align="R")
-            
-            # Reset position and move down
-            self.set_xy(self.l_margin, current_y)
-            self.ln(4)
-            
-            # Reset color
-            self.set_text_color(*COLORS["body_text"])
+        # Move to next line after complete text block
+        self.ln(line_height + 2)
 
 
 def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, format_choice: str = "Default (Compact)"):
@@ -414,73 +397,101 @@ def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, fo
     
     base_url = ensure_valid_youtube_url(video_id) if video_id else "#"
     
-    pdf = PDF(font_path=font_path)
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    
-    # Title
-    main_title = data.get("main_subject", "Video Notes")
-    pdf.create_title(main_title)
-    
-    # Process each section
-    for section_key, section_content in data.items():
-        if section_key == "main_subject" or not isinstance(section_content, list) or not section_content:
-            continue
+    try:
+        pdf = PDF(font_path=font_path)
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
         
-        heading = section_key.replace("_", " ").title()
-        pdf.create_section_heading(heading, section_key)
+        # Title
+        main_title = data.get("main_subject", "Video Notes")
+        pdf.create_title(main_title)
         
-        for item in section_content:
-            # Handle nested topic breakdown
-            if section_key == 'topic_breakdown':
-                # Topic name (bold)
-                topic_name = item.get('topic', '')
-                pdf.set_font(pdf.font_name, "B", 12)
-                pdf.set_text_color(*COLORS["body_text"])
-                pdf.multi_cell(0, 7, f"• {topic_name}")
-                pdf.ln(2)
-                
-                # Process nested details
-                for detail in item.get('details', []):
-                    detail_text = get_content_text(detail)
-                    if not detail_text.strip():
-                        continue
+        # Process each section
+        for section_key, section_content in data.items():
+            if section_key == "main_subject" or not isinstance(section_content, list) or not section_content:
+                continue
+            
+            heading = section_key.replace("_", " ").title()
+            pdf.create_section_heading(heading, section_key)
+            
+            for item in section_content:
+                # Handle nested topic breakdown
+                if section_key == 'topic_breakdown':
+                    # Topic name (bold)
+                    topic_name = item.get('topic', '')
+                    pdf.set_font(pdf.font_name, "B", 12)
+                    pdf.set_text_color(*COLORS["body_text"])
                     
-                    # Indent detail
-                    pdf.set_x(pdf.l_margin + 8)
+                    # Write bullet and topic on same line
+                    pdf.cell(5, 7, "")  # Bullet space
+                    pdf.write(7, f"• {topic_name}")
+                    pdf.ln(8)
                     
-                    # Write detail with highlights
-                    pdf.write_text_with_highlights(detail_text)
-                    
-                    # Add timestamp
-                    timestamp = detail.get("time") if isinstance(detail, dict) else None
-                    pdf.add_timestamp_link(timestamp, video_id, base_url)
+                    # Process nested details
+                    for detail in item.get('details', []):
+                        detail_text = get_content_text(detail)
+                        if not detail_text.strip():
+                            continue
+                        
+                        # Indent and write detail
+                        pdf.set_x(pdf.l_margin + 10)
+                        pdf.write_inline_with_highlights(detail_text)
+                        
+                        # Add timestamp on next available space
+                        timestamp = detail.get("time") if isinstance(detail, dict) else None
+                        if timestamp and video_id:
+                            link_url = f"{base_url}&t={timestamp}s"
+                            pdf.set_text_color(*COLORS["link_text"])
+                            pdf.set_font(pdf.font_name, 'B', 9)
+                            pdf.cell(0, 6, format_timestamp(int(timestamp)), link=link_url, align="R")
+                            pdf.ln(2)
+                            pdf.set_text_color(*COLORS["body_text"])
+                        
+                        pdf.ln(2)
                     
                     pdf.ln(3)
+                    continue
+                    
+                # Handle flat sections with proper bullet alignment
+                content_text = get_content_text(item)
+                if not content_text.strip():
+                    continue
                 
-                pdf.ln(4)  # Extra space after topic
-                continue
+                # Write bullet at current margin
+                pdf.set_font(pdf.font_name, '', 11)
+                pdf.set_text_color(*COLORS["body_text"])
+                pdf.cell(5, 6, "")  # Space for alignment
                 
-            # Handle flat sections
-            content_text = get_content_text(item)
-            if not content_text.strip():
-                continue
-            
-            # Add bullet point
-            pdf.set_font(pdf.font_name, '', 11)
-            pdf.set_text_color(*COLORS["body_text"])
-            pdf.cell(5, 6, "•")
-            
-            # Write content with highlights
-            pdf.write_text_with_highlights(content_text)
-            
-            # Add timestamp
-            timestamp = item.get("time") if isinstance(item, dict) else None
-            pdf.add_timestamp_link(timestamp, video_id, base_url)
-            
-            pdf.ln(4)  # Space between items
+                # Write content inline starting after bullet
+                start_x = pdf.get_x()
+                pdf.write_inline_with_highlights(content_text)
+                
+                # Add timestamp on same line if space, otherwise next line
+                timestamp = item.get("time") if isinstance(item, dict) else None
+                if timestamp and video_id:
+                    link_url = f"{base_url}&t={timestamp}s"
+                    
+                    # Check if we need new line for timestamp
+                    current_y = pdf.get_y()
+                    pdf.set_text_color(*COLORS["link_text"])
+                    pdf.set_font(pdf.font_name, 'B', 9)
+                    
+                    # Try to place on right side
+                    timestamp_text = format_timestamp(int(timestamp))
+                    pdf.cell(0, 6, timestamp_text, link=link_url, align="R")
+                    pdf.ln(2)
+                    pdf.set_text_color(*COLORS["body_text"])
+                
+                pdf.ln(3)
 
-    # Output PDF
-    pdf.output(output)
-    if isinstance(output, BytesIO):
-        output.seek(0)
+        # Output PDF
+        pdf.output(output)
+        if isinstance(output, BytesIO):
+            output.seek(0)
+            
+        print("=== PDF GENERATED SUCCESSFULLY ===\n")
+        
+    except Exception as e:
+        error_msg = f"PDF Generation Error: {str(e)}"
+        print(f"\n!!! {error_msg} !!!\n")
+        raise Exception(error_msg)
