@@ -1,393 +1,470 @@
-# -*- coding: utf-8 -*-
 import streamlit as st
-import os
-import json
-import re
+from utils import inject_custom_css, get_video_id, run_analysis_and_summarize, save_to_pdf
 from pathlib import Path
-import google.generativeai as genai
-from fpdf import FPDF
-from fpdf.enums import XPos, YPos
 from io import BytesIO 
-import time
-from typing import Optional, Tuple, Dict, Any, List 
+import json 
+from typing import List, Dict, Any, Optional
+import re 
 
-# --- Configuration and Constants ---
+# Call the CSS injection function (for base styling)
+inject_custom_css()
 
-EXPECTED_KEYS = [
-    "main_subject", "topic_breakdown", "key_vocabulary",
-    "formulas_and_principles", "teacher_insights",
-    "exam_focus_points", "common_mistakes_explained", 
-    "key_points", "short_tricks", "must_remembers" 
-]
+# --- Configuration and Mapping ---
 
-SYSTEM_PROMPT = """
-You are an intelligent note structurer. 
-Input: a list of transcript segments (each with 'time' and 'text').
-Task: extract key topics, subtopics, and summarized explanations.
-
-**Guidelines:**
-- Always include a key 'main_subject' summarizing the lecture topic in one short sentence.
-- Use the provided 'time' value for each extracted point instead of inferring timestamps.
-- Do NOT create any separate 'timestamp' sections or headings. Only include timestamps inside each point’s 'time' field (in seconds).
-- Keep everything factual and structured for PDF generation.
-
-[Instructions Section]
-"""
-
-COLORS = {
-    "title_bg": (65, 105, 225),
-    "title_text": (255, 255, 255),
-    "heading_text": (30, 30, 30),
-    "link_text": (0, 150, 136),
-    "body_text": (50, 50, 50),
-    "line": (178, 207, 255),
-    "item_title_text": (205, 92, 92),
-    "item_bullet_color": (150, 150, 150),
-    "highlight_bg": (255, 255, 0)
+# Mapping friendly label -> expected JSON key
+LABEL_TO_KEY = {
+    'Topic Breakdown': 'topic_breakdown',
+    'Key Vocabulary': 'key_vocabulary',
+    'Formulas & Principles': 'formulas_and_principles',
+    'Teacher Insights': 'teacher_insights',
+    'Exam Focus Points': 'exam_focus_points',
+    'Common Mistakes': 'common_mistakes_explained',
+    'Key Points': 'key_points',
+    'Short Tricks': 'short_tricks',
+    'Must Remembers': 'must_remembers'
 }
 
-# --------------------------------------------------------------------------
-# --- CORE UTILITY FUNCTIONS ---
-# --------------------------------------------------------------------------
+# Normal Settings Mappings
+PAGE_WORD_COUNT_MAP = {
+    "3–4": 800,
+    "6–8": 1500,
+    "10–12": 2200,
+    "12+": 3000
+}
 
-def extract_gemini_text(response) -> Optional[str]:
-    """Safely extracts text from Gemini response object."""
-    # FIX 1: Print response text before parsing (added in app.py for Streamlit display)
-    response_text = getattr(response, "text", None)
-    if not response_text and hasattr(response, "candidates") and response.candidates:
-        try:
-            return response.candidates[0].content.parts[0].text
-        except (AttributeError, IndexError):
-            pass
-    return response_text
+TIME_MODE_DIVISION_MAP = {
+    "Quick": 1,
+    "Medium": 3,
+    "Detailed": 6
+}
 
-def extract_clean_json(response_text: str) -> Optional[str]:
-    """Tolerantly extracts a single, valid JSON block from the response text."""
-    potential_json_blocks = re.findall(r'\{.*?\}', response_text.strip(), re.DOTALL)
+# --- Application Setup ---
+st.title("📹 AI-Powered Hyperlinked Video Notes Generator")
+
+# --- Model Context Constants ---
+WARNING_THRESHOLD_CHARS = 300000 
+
+# Initialize session state variables
+if 'analysis_data' not in st.session_state:
+    st.session_state['analysis_data'] = None
+if 'api_key_valid' not in st.session_state:
+    st.session_state['api_key_valid'] = False
+if 'output_filename_base' not in st.session_state:
+    st.session_state['output_filename_base'] = "Video_Notes"
+if 'chunked_results' not in st.session_state:
+    st.session_state['chunked_results'] = []
+if 'processing' not in st.session_state:
+    st.session_state['processing'] = False
+
+# Initialize new session states for persistence and defaults
+if 'num_pages_select' not in st.session_state:
+    st.session_state['num_pages_select'] = "12+"
+if 'time_mode_select' not in st.session_state:
+    st.session_state['time_mode_select'] = "Medium" 
+if 'custom_word_count' not in st.session_state:
+    st.session_state['custom_word_count'] = 1500
+if 'custom_divisions' not in st.session_state:
+    st.session_state['custom_divisions'] = 3
+if 'settings_mode' not in st.session_state:
+    st.session_state['settings_mode'] = "Normal Settings"
+
+# --- 🔧 CORE HELPER FUNCTIONS ---
+
+def preprocess_transcript(text):
+    # (Implementation remains unchanged)
+    import re
+    pattern = r'\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?' 
+    matches = list(re.finditer(pattern, text))
+    segments = []
     
-    for json_string in potential_json_blocks:
-        json_string = re.sub(r'```json\s*|```|\s*[*•]', '', json_string).strip()
+    if not matches:
+         if text:
+             return [{"time": "00:00", "text": text.strip()}]
+         return []
+
+    for i in range(len(matches)):
+        start = matches[i].end()
+        end = matches[i+1].start() if i + 1 < len(matches) else len(text)
+        ts = matches[i].group(1)
+        segments.append({"time": ts, "text": text[start:end].strip()})
         
-        if not json_string.startswith('{'):
-            continue
-        if not json_string.endswith('}'):
-            json_string += '}'
+    return segments
+
+def split_transcript_by_parts(transcript: str, num_parts: int) -> List[str]:
+    # (Implementation remains unchanged)
+    text = transcript or ""
+    length = len(text)
+    
+    num_parts = max(1, min(num_parts, length)) 
+    part_size = length // num_parts
+    
+    parts = []
+    for i in range(num_parts):
+        start = i * part_size
+        end = (i + 1) * part_size if i < num_parts - 1 else length
+        parts.append(text[start:end])
+    return parts
+
+def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # (Implementation remains unchanged)
+    LIST_KEYS = list(LABEL_TO_KEY.values())
+    
+    combined: Dict[str, Any] = {"main_subject": ""}
+    
+    for key in LIST_KEYS:
+        combined[key] = []
         
-        try:
-            json.loads(json_string)
-            return json_string
-        except json.JSONDecodeError:
-            continue
+    for res in results:
+        res_normalized = {LABEL_TO_KEY.get(k, k): v for k, v in res.items()}
+        
+        for k, v in res_normalized.items():
+            if k == "main_subject":
+                if not combined.get("main_subject") and v:
+                    combined["main_subject"] = str(v).strip()
+                continue
+
+            if isinstance(v, list) and k in LIST_KEYS:
+                combined[k].extend(v)
+    
+    for k in LIST_KEYS:
+        if combined[k]:
+            unique_items = []
+            seen_hashes = set()
             
-    return None
+            for item in combined[k]:
+                item_hash = json.dumps(item, sort_keys=True)
+                
+                if item_hash not in seen_hashes:
+                    unique_items.append(item)
+                    seen_hashes.add(item_hash)
+            
+            combined[k] = unique_items
+            
+    return combined
 
-def get_content_text(item):
-    """Retrieves content text using multiple fallback keys, ensuring string output."""
-    if isinstance(item, dict):
-        text = item.get('detail') or item.get('explanation') or item.get('point') or item.get('text') or item.get('definition') or item.get('formula_or_principle') or item.get('insight') or item.get('mistake') or item.get('trick') or item.get('fact')
-        return str(text or '')
-    return str(item or '')
+# --------------------------------------------------------------------------
+# --- Sidebar Setup and Conditional Logic ---
+# --------------------------------------------------------------------------
 
-
-@st.cache_data(ttl=0) 
-def run_analysis_and_summarize(api_key: str, transcript_segments: List[Dict], max_words: int, sections_list_keys: list, user_prompt: str, model_name: str, is_easy_read: bool) -> Tuple[Optional[Dict[str, Any]], Optional[str], str]:
+# Set up the two-mode selector
+with st.sidebar:
+    st.header("🔑 Configuration")
     
-    sections_to_process = ", ".join(sections_list_keys)
-    
-    if is_easy_read:
-        prompt_instructions = SYSTEM_PROMPT.replace('[Instructions Section]', f"""
-        4. **Highlighting:** Inside any 'detail', 'definition', 'explanation', or 'insight' string, find the single most critical phrase (3-5 words) and wrap it in `<hl>` and `</hl>` tags.
-        5. Be concise. The total combined length of all extracted details must not exceed {max_words} words.
-        6. Extract the information for the following categories...
-        """)
+    # 1. API Key Input (Always visible)
+    api_key = st.text_input("Gemini API Key:", type="password")
+    if api_key:
+        st.session_state['api_key_valid'] = True
+        st.success("API Key Entered.")
     else:
-        prompt_instructions = SYSTEM_PROMPT.replace('[Instructions Section]', f"""
-        4. Be concise. The total combined length of all extracted details must not exceed {max_words} words.
-        5. Extract the information for the following categories...
-        6. DO NOT use any special markdown or tags like <hl> in the final JSON content.
-        """)
+        st.session_state['api_key_valid'] = False
+        st.warning("Please enter your Gemini API Key.")
 
-    transcript_json_string = json.dumps(transcript_segments, indent=2)
-
-    full_prompt = f"""
-    {prompt_instructions}
-
-    **CRITICAL INSTRUCTION: PROVIDE ONLY VALID, PURE JSON. DO NOT INCLUDE ANY MARKUP (**), BULLETS (•), OR SURROUNDING TEXT OUTSIDE THE JSON {{{{...}}}} BLOCK. THE JSON VALUES MUST CONTAIN ONLY CLEAN TEXT. THE KEYS MUST BE IN SNAKE_CASE.**
-
-    **USER CONSTRAINTS (from Streamlit app):**
-    - Max Detail Length: {max_words} words (Total).
-    - **REQUIRED OUTPUT CATEGORIES (SNAKE_CASE):** **{sections_to_process}**
-    - User Refinement Prompt: {user_prompt}
-
-    Transcript to Analyze (JSON Format):
-    ---
-    {transcript_json_string}
-    ---
-    """
+    st.markdown("---")
     
-    if not api_key:
-        time.sleep(1)
-        return None, "API Key Missing", full_prompt
-        
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name) 
-        
-        response = model.generate_content(full_prompt)
-        response_text = extract_gemini_text(response)
-
-        if not response_text:
-            time.sleep(2)
-            return None, "Empty response from model.", full_prompt
-        
-        cleaned_response = extract_clean_json(response_text)
-
-        if not cleaned_response:
-            return None, "JSON structure could not be extracted from API response.", full_prompt
-
-        json_data = json.loads(cleaned_response)
-        
-        # ✅ PERMANENT FIX: Normalize keys from camelCase/PascalCase to snake_case
-        json_data = {re.sub(r'([A-Z])', lambda m: '_' + m.group(1).lower(), k).lstrip('_'): v for k, v in json_data.items()}
-        
-        return json_data, None, full_prompt
-        
-    except json.JSONDecodeError as e:
-        return None, f"JSON PARSE ERROR: {e}", full_prompt
-    except Exception as e:
-        return None, f"Gemini API Error: {e}", full_prompt
-        
-def inject_custom_css():
-    """Injects custom CSS for application-wide styling."""
-    st.markdown(
-        """
-        <style>
-        p, label, .stMarkdown, .stTextArea, .stSelectbox {
-            font-size: 1.05rem !important; 
-        }
-
-        .pdf-output-text p, .pdf-output-text div {
-            font-size: var(--custom-font-size);
-            line-height: 1.25;
-            margin-bottom: 0.2em;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
+    # Mode Selector (Always visible)
+    settings_mode = st.radio(
+        "⚙️ Settings Mode", 
+        ["Normal Settings", "Advanced Custom Settings"], 
+        key='settings_mode'
     )
     
-def get_video_id(url: str) -> Optional[str]:
-    """Extracts the YouTube video ID from a URL."""
-    patterns = [
-        r"(?<=v=)[^&#?]+", r"(?<=be/)[^&#?]+", r"(?<=live/)[^&#?]+",
-        r"(?<=embed/)[^&#?]+", r"(?<=shorts/)[^&#?]+"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match: return match.group(0)
-    return None
+    st.markdown("---")
 
-def clean_gemini_response(response_text: str) -> str:
-    match = re.search(r'```json\s*(\{.*?\})\s*```|(\{.*?\})', response_text, re.DOTALL)
-    if match: return match.group(1) if match.group(1) else match.group(2)
-    return response_text.strip()
-
-def format_timestamp(total_seconds: int) -> str:
-    """Converts total seconds to [HH:MM:SS] or [MM:SS] format."""
-    total_seconds = int(total_seconds)
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
+    # --- Conditional Settings Panel ---
     
-    if hours > 0:
-        return f"[{hours:02}:{minutes:02}:{seconds:02}]"
-    else:
-        return f"[{minutes:02}:{seconds:02}]"
-
-def ensure_valid_youtube_url(video_id: str) -> str:
-    return f"https://www.youtube.com/watch?v={video_id}"
-
-# --- PDF Class ---
-class PDF(FPDF):
-    def __init__(self, base_path, is_easy_read, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.font_name = "NotoSans"
-        self.is_easy_read = is_easy_read
-        self.base_line_height = 10 if is_easy_read else 7 
-        
-        try:
-            self.add_font(self.font_name, "", str(base_path / "NotoSans-Regular.ttf"))
-            self.add_font(self.font_name, "B", str(base_path / "NotoSans-Bold.ttf"))
-        except RuntimeError:
-            self.font_name = "Arial" 
-            print(f"Warning: NotoSans font files not found. Falling back to {self.font_name}.")
-
-
-    def create_title(self, title):
-        self.set_font(self.font_name, "B", 24)
-        self.set_fill_color(*COLORS["title_bg"])
-        self.set_text_color(*COLORS["title_text"])
-        
-        title_width = self.w - 2 * self.l_margin
-        
-        self.multi_cell(title_width, 10, title, border=0, align="C", fill=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        self.ln(10)
-
-    def create_section_heading(self, heading):
-        self.set_font(self.font_name, "B", 16)
-        self.set_text_color(*COLORS["heading_text"])
-        self.cell(0, 10, heading, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        self.set_draw_color(*COLORS["line"])
-        self.line(self.get_x(), self.get_y(), self.get_x() + 190, self.get_y())
-        self.ln(5)
-
-    def write_highlighted_text(self, text, line_height):
-        """
-        Writes text, handling <hl> tags and advancing the cursor properly.
-        """
-        self.set_font(self.font_name, '', 11)
-        self.set_text_color(*COLORS["body_text"])
-        
-        parts = re.split(r'(<hl>.*?</hl>)', text)
-        
-        for part in parts:
-            if part.startswith('<hl>'):
-                highlight_text = part[4:-5]
-                self.set_fill_color(*COLORS["highlight_bg"])
-                self.set_font(self.font_name, 'B', 11)
-                
-                self.cell(self.get_string_width(highlight_text), line_height, highlight_text, fill=True, new_x=XPos.RIGHT, new_y=YPos.TOP)
-                self.set_font(self.font_name, '', 11)
-            else:
-                self.set_fill_color(255, 255, 255)
-                self.write(line_height, part) 
-
-# --- Save to PDF Function (Primary Output) ---
-def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, format_choice: str = "Default (Compact)"):
+    final_max_words: int
+    final_num_divisions: int
     
-    # 🧠 DEBUG 5: Print data before calling
-    print("PDF INPUT DEBUG:", json.dumps(data, indent=2)[:1000] + "...")
+    if settings_mode == "Normal Settings":
+        st.header("✨ Normal Settings")
+        
+        # Normal Setting 1: Number of Pages (Word Count Control)
+        st.subheader("Output Size (Normal)")
+        num_pages_choice = st.selectbox(
+            "Target PDF Length (Pages):",
+            options=list(PAGE_WORD_COUNT_MAP.keys()),
+            index=list(PAGE_WORD_COUNT_MAP.keys()).index(st.session_state.get('num_pages_select', "12+")),
+            key='num_pages_select', 
+            help="Controls the **total length** of the extracted summary."
+        )
+        final_max_words = PAGE_WORD_COUNT_MAP.get(num_pages_choice, 3000)
+        st.markdown(f"**Target Word Count:** `{final_max_words}`")
+
+        st.markdown("---")
+        
+        # Normal Setting 2: Choose Time Mode (Transcript Division Control)
+        st.subheader("Processing Speed (Normal)")
+        time_mode_choice = st.selectbox(
+            "Chunking Mode:",
+            options=list(TIME_MODE_DIVISION_MAP.keys()),
+            index=list(TIME_MODE_DIVISION_MAP.keys()).index(st.session_state.get('time_mode_select', "Medium")),
+            key='time_mode_select', 
+            help="Fewer divisions = quicker processing; More divisions = better contextual density."
+        )
+        final_num_divisions = TIME_MODE_DIVISION_MAP[time_mode_choice]
+        st.markdown(f"**Transcript Divisions:** `{final_num_divisions}x`")
+
+    else: # Advanced Custom Settings
+        st.header("🔬 Advanced Custom Settings")
+        
+        # Advanced Setting 1: Custom Word Count (Overrides Pages)
+        st.subheader("Output Size (Custom)")
+        custom_word_count = st.number_input(
+            'Custom Target Word Count:', 
+            min_value=500, 
+            max_value=10000, 
+            value=st.session_state.get('custom_word_count', 1500), 
+            step=100, 
+            key='custom_word_count', 
+            help="Set the precise word limit for the total output summary."
+        )
+        final_max_words = custom_word_count
+        st.markdown(f"**Target Word Count:** `{final_max_words}`")
+        
+        st.markdown("---")
+
+        # Advanced Setting 2: Custom Transcript Divisions (Overrides Time Mode)
+        st.subheader("Processing Speed (Custom)")
+        custom_divisions = st.slider(
+            'Custom Transcript Divisions:',
+            min_value=1,
+            max_value=10,
+            value=st.session_state.get('custom_divisions', 3),
+            step=1,
+            key='custom_divisions',
+            help="The number of parts the transcript will be split into for analysis."
+        )
+        final_num_divisions = custom_divisions
+        st.markdown(f"**Transcript Divisions:** `{final_num_divisions}x`")
+
+    st.markdown("---")
     
-    is_easy_read = format_choice.startswith("Easier Read")
+    # Model Selection (Always visible)
+    model_choice = st.selectbox(
+        "Model Selection:",
+        options=["gemini-2.5-pro", "gemini-2.5-flash"],
+        index=0, 
+        key='model_choice_select', 
+        help="Pro = better reasoning, 1M token context. Flash = cheaper, faster, smaller context."
+    )
+
+    st.markdown("---")
     
+    # 4. YouTube URL Input (Always visible)
+    yt_url = st.text_input("YouTube URL (Optional):", help="Provide a URL to enable hyperlinked timestamps in the PDF.")
+    video_id = get_video_id(yt_url)
     if video_id:
-        base_url = ensure_valid_youtube_url(video_id)
-        has_video_id = True
-    else:
-        base_url = "#"  
-        has_video_id = False
-        
-    pdf = PDF(base_path=font_path, is_easy_read=is_easy_read)
-    pdf.add_page()
+        st.success(f"Video ID found: {video_id}")
+    elif yt_url:
+        st.warning("Invalid YouTube URL format. Timestamps will not be hyperlinked.")
     
-    main_title = data.get("main_subject") or "Lecture Summary"
-    pdf.create_title(main_title)
+    st.markdown("---")
+    st.header("⚙️ Analysis Details")
     
-    line_height = pdf.base_line_height
-
-    key_mapping = {
-        'Topic Breakdown': 'topic_breakdown', 'Key Vocabulary': 'key_vocabulary',
-        'Formulas & Principles': 'formulas_and_principles', 'Teacher Insights': 'teacher_insights',
-        'Exam Focus Points': 'exam_focus_points', 'Common Mistakes': 'common_mistakes_explained',
-        'Key Points': 'key_points', 'Short Tricks': 'short_tricks', 'Must Remembers': 'must_remembers'
+    # B. Checkboxes for Section Selection (Always visible)
+    section_options = {
+        'Topic Breakdown': True, 'Key Vocabulary': True,
+        'Formulas & Principles': True, 'Teacher Insights': False, 
+        'Exam Focus Points': True, 'Common Mistakes': False,
+        'Key Points': True, 'Short Tricks': False, 'Must Remembers': True      
     }
+    
+    sections_list = []
+    st.subheader("Select Output Sections")
+    for label, default_val in section_options.items():
+        if st.checkbox(label, value=default_val):
+            sections_list.append(label)
 
-    for friendly_name, json_key in key_mapping.items():
-        values = data.get(json_key)
+    st.markdown("---")
+    
+    # G. Custom Filename Input (Always visible)
+    if video_id:
+        st.session_state['output_filename_base'] = f"Notes_{video_id}"
+    
+    output_filename_base = st.session_state['output_filename_base']
+    output_filename = st.text_input(
+        "Base Name for PDF file:",
+        value=output_filename_base + ".pdf",
+        key="output_filename_input"
+    )
+    
+# --------------------------------------------------------------------------
+# --- Main Content: Transcript Input, Button, and Output ---
+# --------------------------------------------------------------------------
+
+# 💡 Dual Format Selection Radio Button
+format_choice = st.radio(
+    "Choose Reading Format:",
+    options=["Default (Compact)", "Easier Read (Spacious & Highlighted)"],
+    index=0,
+    horizontal=True,
+    key='pdf_format_choice',
+    help="Easier Read format adds vertical spacing between lines and enables content highlighting."
+)
+st.markdown("---")
+
+st.subheader("Transcript Input")
+transcript_text = st.text_area(
+    'Paste the video transcript here (must include timestamps for best results):',
+    height=300,
+    placeholder="[00:00] Welcome to the lesson. [00:45] We start with Topic A..."
+)
+
+# Optional Transcript Warning
+if len(transcript_text) > WARNING_THRESHOLD_CHARS and model_choice == "gemini-2.5-flash":
+    st.warning(f"⚠️ **Long Transcript Detected!** The text is over {WARNING_THRESHOLD_CHARS} characters. We recommend selecting **Gemini 2.5 Pro** or increasing the divisions to avoid context overflow with Flash.")
+
+user_prompt_input = st.text_area(
+    'Refine AI Focus (Optional Prompt):',
+    value="Ensure the output is highly condensed and only focus on practical applications and examples.",
+    height=100
+)
+
+# E. The Analysis Trigger Button
+can_run = transcript_text and st.session_state['api_key_valid']
+run_analysis = st.button(
+    f"🚀 Generate Notes using {model_choice}", 
+    type="primary", 
+    disabled=not can_run or st.session_state['processing']
+) 
+
+is_easy_read = format_choice.startswith("Easier Read")
+
+if run_analysis and not st.session_state['processing']:
+    
+    # Print the active configuration for debugging
+    print(f"\n--- DEBUG RUN START ---")
+    print(f"| Settings Mode: {settings_mode}")
+    print(f"| Final Max Words: {final_max_words}")
+    print(f"| Final Divisions: {final_num_divisions}")
+    print(f"| Model: {model_choice}")
+    print(f"| Video ID: {video_id}")
+    print(f"--- DEBUG RUN END ---")
+    
+    st.session_state['processing'] = True
+    st.session_state['chunked_results'] = []
+    
+    try:
+        # Determine the number of parts to use (1 for Pro, or the configured division count)
+        num_parts_to_use = 1 
+        if model_choice == "gemini-2.5-flash":
+            num_parts_to_use = final_num_divisions
         
-        # 🧠 DEBUG 5: Print each friendly_name and len(values)
-        print(f"  > Processing '{friendly_name}' ({json_key}): {len(values) if isinstance(values, list) else values}")
+        transcript_parts = split_transcript_by_parts(transcript_text, num_parts_to_use)
         
-        if not values:
-            continue
-            
-        pdf.create_section_heading(friendly_name)
+        st.info(f"Analyzing in **{len(transcript_parts)}** sequential part(s) using **{model_choice}** (Divisions: {num_parts_to_use}).")
+
+        # Chunked Execution
+        status_bar = st.progress(0, text="Starting analysis...")
         
-        for item in values:
-            is_nested = isinstance(item, dict) and 'details' in item
+        sections_list_keys = [LABEL_TO_KEY.get(lbl, lbl) for lbl in sections_list]
+
+        for i, part in enumerate(transcript_parts, start=1):
+            status_bar.progress(
+                i / len(transcript_parts), 
+                text=f'Analyzing Part {i} of {len(transcript_parts)}... (Model: {model_choice})'
+            )
             
-            link_cell_width = 30 
+            preprocessed_part = preprocess_transcript(part)
+
+            data_json, error_msg, full_prompt = run_analysis_and_summarize(
+                api_key, preprocessed_part, final_max_words, sections_list_keys, user_prompt_input, model_choice, is_easy_read
+            )
             
-            if is_nested:
-                # 1. Write the Topic Name (Bold)
-                pdf.set_font(pdf.font_name, "B", 11)
-                pdf.multi_cell(0, line_height, text=f"  {item.get('topic', '')}", new_x=XPos.LMARGIN)
-                
-                # 2. Write all Details for that topic
-                for detail_item in item.get('details', []):
-                    timestamp_sec = int(detail_item.get('time', 0))
-                    link = f"{base_url}&t={timestamp_sec}s" if has_video_id else base_url
-                    
-                    detail_text = get_content_text(detail_item)
-                    detail_text = re.sub(r'\s+', ' ', detail_text).strip()
-                    text_content = f"    - {detail_text}"
-                    
-                    start_x = pdf.get_x()
-                    start_y = pdf.get_y()
-                    
-                    pdf.set_text_color(*COLORS["body_text"])
-                    pdf.set_font(pdf.font_name, "", 11)
-                    
-                    pdf.write_highlighted_text(text_content, line_height)
-                    
-                    pdf.ln(line_height) 
-                    final_y = pdf.get_y()
-                    
-                    # Position the cursor for the link placement
-                    pdf.set_xy(pdf.w - pdf.r_margin - link_cell_width, final_y - line_height)
-                    
-                    # Place the timestamp link
-                    pdf.set_text_color(*COLORS["link_text"])
-                    pdf.cell(link_cell_width, line_height, text=format_timestamp(timestamp_sec), link=link, align="R")
-                    
-                    # Reset cursor position
-                    pdf.set_xy(pdf.l_margin, final_y)
+            # 🧠 DEBUG 1: Print model response if parsing fails
+            if error_msg and error_msg.startswith("JSON structure could not be extracted"):
+                st.write("🛑 DEBUG: Raw Model Response (Failed Parsing):", getattr(data_json, "text", "N/A"))
             
+            if data_json:
+                st.session_state['chunked_results'].append(data_json)
             else:
-                # NON-NESTED ITEMS (Vocabulary, Mistakes, Points, etc.)
-                timestamp_sec = int(item.get('time', 0))
-                link = f"{base_url}&t={timestamp_sec}s" if has_video_id else base_url
-                
-                start_y = pdf.get_y()
-                
-                for sk, sv in item.items():
-                    if sk != 'time':
-                        title = sk.replace('_', ' ').title()
-                        
-                        value_str = get_content_text({sk: sv})
-                        
-                        # 1. Write Title (Bold)
-                        title_str = f"• {title}: "
-                        pdf.set_text_color(*COLORS["item_title_text"]) 
-                        pdf.set_font(pdf.font_name, "B", 11)
-                        # Write the bold title part inline
-                        pdf.cell(pdf.get_string_width(title_str), line_height, title_str, new_x=XPos.RIGHT, new_y=YPos.TOP)
-                        
-                        # 2. Write Value (Normal, Wrapping)
-                        value_start_x = pdf.get_x()
-                        
-                        pdf.set_text_color(*COLORS["body_text"])
-                        pdf.set_font(pdf.font_name, "", 11)
-                        pdf.set_xy(value_start_x, pdf.get_y())
-                        
-                        # Use write_highlighted_text
-                        pdf.write_highlighted_text(value_str, line_height)
-                        pdf.ln(line_height) 
+                st.error(f"Analysis failed for Part {i}. Error: {error_msg}")
+                st.session_state['chunked_results'] = []
+                break
 
-                final_y = pdf.y
-                
-                # Position the cursor for the link placement
-                pdf.set_xy(pdf.w - pdf.r_margin - link_cell_width, final_y - line_height)
-                
-                # Place the timestamp link
-                pdf.set_text_color(*COLORS["link_text"])
-                pdf.cell(link_cell_width, line_height, text=format_timestamp(timestamp_sec), link=link, align="R")
-                
-                # Reset cursor position
-                pdf.set_xy(pdf.l_margin, final_y)
-                
-            pdf.ln(2) 
+        status_bar.empty()
 
-    pdf.output(output)
-    if isinstance(output, BytesIO):
-        output.seek(0)
+        if st.session_state['chunked_results']:
+            st.success(f"Analysis complete for all {len(st.session_state['chunked_results'])} parts.")
+            st.session_state['pdf_ready'] = True
+        else:
+            st.session_state['pdf_ready'] = False
+            
+    finally:
+        st.session_state['processing'] = False
+
+st.markdown("---")
+
+# 7. Output Options and Download Section
+if st.session_state['chunked_results']:
+    st.subheader("🧩 Output Options")
+    combine_choice = st.radio(
+        "Choose how to handle analyzed chunks:",
+        options=["🔗 Combine all outputs into one file", "📦 Download each part separately"],
+        index=0,
+        horizontal=True,
+        key='combine_choice_radio',
+        help="You can merge all analyzed chunks into a single hyperlinked PDF, or keep each chunk's output separate."
+    )
+
+    current_dir = Path(__file__).parent
+
+    if combine_choice.startswith("🔗"):
+        st.subheader("Single Merged PDF")
+        
+        combined_data = merge_all_json_outputs(st.session_state['chunked_results'])
+        
+        # 🧠 DEBUG 2 & 3: Final merged output check
+        st.write("🧠 DEBUG: Final merged JSON keys (check for expected keys and list lengths):")
+        
+        data = combined_data
+        st.write("**main\_subject**:", data.get("main_subject"))
+        
+        # Check list keys
+        for k, v in data.items():
+            if isinstance(v, list) and k != "main_subject":
+                st.write(f"**{k}**:", len(v))
+        
+        pdf_output = BytesIO()
+        try:
+            with st.spinner("Generating combined PDF..."):
+                # 🧠 DEBUG 4: save_to_pdf is called here
+                save_to_pdf(combined_data, video_id, current_dir, pdf_output, format_choice)
+            
+            st.download_button(
+                label=f"⬇️ Download Merged Notes: {output_filename_base}.pdf",
+                data=pdf_output,
+                file_name=output_filename, 
+                mime="application/pdf" 
+            )
+        except Exception as e:
+            st.error(f"Error generating merged PDF: {e}")
+            st.warning("Ensure font files (NotoSans-*.ttf) are in the main directory.")
+
+    else:
+        st.subheader("Separate PDF Downloads")
+        st.info("Each part represents a section of the original transcript.")
+
+        for i, part_data in enumerate(st.session_state['chunked_results'], start=1):
+            pdf_output = BytesIO()
+            
+            try:
+                with st.spinner(f"Preparing Part {i}..."):
+                    # 🧠 DEBUG 4: save_to_pdf is called here
+                    save_to_pdf(part_data, video_id, current_dir, pdf_output, format_choice)
+                
+                st.download_button(
+                    label=f"⬇️ Download Part {i}",
+                    data=pdf_output,
+                    file_name=f"{output_filename_base}_part{i}.pdf",
+                    mime="application/pdf",
+                    key=f'download_part_{i}'
+                )
+            except Exception as e:
+                st.error(f"Error generating Part {i} PDF: {e}")
+                break
+
+st.markdown("---")
+
+if not st.session_state['chunked_results'] and st.session_state.get('pdf_ready'):
+    st.warning("Analysis ran successfully, but no output was generated. Please verify your transcript and settings.")
