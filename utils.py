@@ -52,7 +52,6 @@ COLORS = {
 
 def extract_gemini_text(response) -> Optional[str]:
     """Safely extracts text from Gemini response object."""
-    # FIX 1: Print response text before parsing (added in app.py for Streamlit display)
     response_text = getattr(response, "text", None)
     if not response_text and hasattr(response, "candidates") and response.candidates:
         try:
@@ -263,130 +262,98 @@ class PDF(FPDF):
                 self.write(line_height, part) 
 
 # --- Save to PDF Function (Primary Output) ---
+# ✅ FIX: Replacing the entire save_to_pdf function with the corrected, simplified logic
 def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, format_choice: str = "Default (Compact)"):
     
-    # 🧠 DEBUG 5: Print data before calling
     print("PDF INPUT DEBUG:", json.dumps(data, indent=2)[:1000] + "...")
     
     is_easy_read = format_choice.startswith("Easier Read")
+    base_url = ensure_valid_youtube_url(video_id) if video_id else "#"
     
-    if video_id:
-        base_url = ensure_valid_youtube_url(video_id)
-        has_video_id = True
-    else:
-        base_url = "#"  
-        has_video_id = False
-        
     pdf = PDF(base_path=font_path, is_easy_read=is_easy_read)
     pdf.add_page()
     
-    main_title = data.get("main_subject") or "Lecture Summary"
+    # --- Title ---
+    main_title = data.get("main_subject", "Video Notes")
     pdf.create_title(main_title)
     
     line_height = pdf.base_line_height
-
-    key_mapping = {
-        'Topic Breakdown': 'topic_breakdown', 'Key Vocabulary': 'key_vocabulary',
-        'Formulas & Principles': 'formulas_and_principles', 'Teacher Insights': 'teacher_insights',
-        'Exam Focus Points': 'exam_focus_points', 'Common Mistakes': 'common_mistakes_explained',
-        'Key Points': 'key_points', 'Short Tricks': 'short_tricks', 'Must Remembers': 'must_remembers'
-    }
-
-    for friendly_name, json_key in key_mapping.items():
-        values = data.get(json_key)
+    
+    # --- Go through each section ---
+    for section_key, section_content in data.items():
+        if section_key == "main_subject" or not section_content:
+            continue
         
         # 🧠 DEBUG 5: Print each friendly_name and len(values)
-        print(f"  > Processing '{friendly_name}' ({json_key}): {len(values) if isinstance(values, list) else values}")
+        friendly_name = section_key.replace("_", " ").title()
+        print(f"  > Processing '{friendly_name}' ({section_key}): {len(section_content) if isinstance(section_content, list) else section_content}")
         
-        if not values:
-            continue
-            
-        pdf.create_section_heading(friendly_name)
+        # Convert section key to readable heading
+        heading = section_key.replace("_", " ").title()
+        pdf.create_section_heading(heading)
         
-        for item in values:
-            is_nested = isinstance(item, dict) and 'details' in item
-            
-            link_cell_width = 30 
-            
-            if is_nested:
-                # 1. Write the Topic Name (Bold)
-                pdf.set_font(pdf.font_name, "B", 11)
-                pdf.multi_cell(0, line_height, text=f"  {item.get('topic', '')}", new_x=XPos.LMARGIN)
+        # Handle list content (which is most common for sections)
+        if isinstance(section_content, list):
+            for item in section_content:
+                # Use tolerant getter here
+                content_text = get_content_text(item)
+                if not content_text.strip():
+                    continue
                 
-                # 2. Write all Details for that topic
-                for detail_item in item.get('details', []):
-                    timestamp_sec = int(detail_item.get('time', 0))
-                    link = f"{base_url}&t={timestamp_sec}s" if has_video_id else base_url
+                # Check for nested structure (e.g., Topic Breakdown)
+                if 'topic' in item and 'details' in item and isinstance(item['details'], list):
+                    # Write the main topic title (bold)
+                    pdf.set_font(pdf.font_name, 'B', 11)
+                    pdf.write(line_height, f"• {item['topic']}")
+                    pdf.ln(line_height)
                     
-                    detail_text = get_content_text(detail_item)
-                    detail_text = re.sub(r'\s+', ' ', detail_text).strip()
-                    text_content = f"    - {detail_text}"
-                    
-                    start_x = pdf.get_x()
-                    start_y = pdf.get_y()
-                    
-                    pdf.set_text_color(*COLORS["body_text"])
-                    pdf.set_font(pdf.font_name, "", 11)
-                    
-                    pdf.write_highlighted_text(text_content, line_height)
-                    
-                    pdf.ln(line_height) 
-                    final_y = pdf.get_y()
-                    
-                    # Position the cursor for the link placement
-                    pdf.set_xy(pdf.w - pdf.r_margin - link_cell_width, final_y - line_height)
-                    
-                    # Place the timestamp link
-                    pdf.set_text_color(*COLORS["link_text"])
-                    pdf.cell(link_cell_width, line_height, text=format_timestamp(timestamp_sec), link=link, align="R")
-                    
-                    # Reset cursor position
-                    pdf.set_xy(pdf.l_margin, final_y)
-            
-            else:
-                # NON-NESTED ITEMS (Vocabulary, Mistakes, Points, etc.)
-                timestamp_sec = int(item.get('time', 0))
-                link = f"{base_url}&t={timestamp_sec}s" if has_video_id else base_url
-                
-                start_y = pdf.get_y()
-                
-                for sk, sv in item.items():
-                    if sk != 'time':
-                        title = sk.replace('_', ' ').title()
+                    # Process nested details
+                    for detail in item['details']:
+                        detail_text = get_content_text(detail)
+                        timestamp = detail.get("time") if isinstance(detail, dict) else None
                         
-                        value_str = get_content_text({sk: sv})
+                        pdf.set_font(pdf.font_name, '', 11)
+                        pdf.set_x(pdf.get_x() + 5) # Indent
                         
-                        # 1. Write Title (Bold)
-                        title_str = f"• {title}: "
-                        pdf.set_text_color(*COLORS["item_title_text"]) 
-                        pdf.set_font(pdf.font_name, "B", 11)
-                        # Write the bold title part inline
-                        pdf.cell(pdf.get_string_width(title_str), line_height, title_str, new_x=XPos.RIGHT, new_y=YPos.TOP)
+                        # Write text content
+                        pdf.write_highlighted_text(detail_text, line_height)
                         
-                        # 2. Write Value (Normal, Wrapping)
-                        value_start_x = pdf.get_x()
+                        # Add timestamp/link logic
+                        if timestamp and video_id:
+                            # Note: Simplified link logic from original instructions
+                            link_url = f"{base_url}&t={timestamp}s"
+                            pdf.set_text_color(*COLORS["link_text"])
+                            pdf.set_font(pdf.font_name, 'B', 11)
+                            pdf.write(line_height, f" [{format_timestamp(int(timestamp))}]")
+                            pdf.set_text_color(*COLORS["body_text"])
                         
-                        pdf.set_text_color(*COLORS["body_text"])
-                        pdf.set_font(pdf.font_name, "", 11)
-                        pdf.set_xy(value_start_x, pdf.get_y())
-                        
-                        # Use write_highlighted_text
-                        pdf.write_highlighted_text(value_str, line_height)
-                        pdf.ln(line_height) 
+                        pdf.ln(line_height)
+                        pdf.set_x(pdf.l_margin) # Reset indent
 
-                final_y = pdf.y
-                
-                # Position the cursor for the link placement
-                pdf.set_xy(pdf.w - pdf.r_margin - link_cell_width, final_y - line_height)
-                
-                # Place the timestamp link
-                pdf.set_text_color(*COLORS["link_text"])
-                pdf.cell(link_cell_width, line_height, text=format_timestamp(timestamp_sec), link=link, align="R")
-                
-                # Reset cursor position
-                pdf.set_xy(pdf.l_margin, final_y)
-                
-            pdf.ln(2) 
+                else:
+                    # Simple list item (Vocabulary, Key Points, etc.)
+                    timestamp = item.get("time") if isinstance(item, dict) else None
+                    
+                    pdf.set_font(pdf.font_name, '', 11)
+                    
+                    # Write text content
+                    pdf.write_highlighted_text(content_text, line_height)
+                    
+                    # Add timestamp/link logic
+                    if timestamp and video_id:
+                        link_url = f"{base_url}&t={timestamp}s"
+                        pdf.set_text_color(*COLORS["link_text"])
+                        pdf.set_font(pdf.font_name, 'B', 11)
+                        pdf.write(line_height, f" [{format_timestamp(int(timestamp))}]")
+                        pdf.set_text_color(*COLORS["body_text"])
+
+                    pdf.ln(line_height)
+
+                if is_easy_read:
+                    pdf.ln(2) # Extra space for easy reading
+        
+        # Add a major break after a section completes
+        pdf.ln(5)
 
     pdf.output(output)
     if isinstance(output, BytesIO):
