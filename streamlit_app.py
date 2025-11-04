@@ -3,14 +3,15 @@ from utils import inject_custom_css, get_video_id, run_analysis_and_summarize, s
 from pathlib import Path
 from io import BytesIO 
 import json 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import re 
 
 # Call the CSS injection function (for base styling)
 inject_custom_css()
 
 # --- Configuration and Mapping ---
 
-# Mapping friendly label -> expected JSON key (Used to fix the API prompt and merge logic)
+# Mapping friendly label -> expected JSON key
 LABEL_TO_KEY = {
     'Topic Breakdown': 'topic_breakdown',
     'Key Vocabulary': 'key_vocabulary',
@@ -21,6 +22,20 @@ LABEL_TO_KEY = {
     'Key Points': 'key_points',
     'Short Tricks': 'short_tricks',
     'Must Remembers': 'must_remembers'
+}
+
+# Normal Settings Mappings
+PAGE_WORD_COUNT_MAP = {
+    "3–4": 800,
+    "6–8": 1500,
+    "10–12": 2200,
+    "12+": 3000
+}
+
+TIME_MODE_DIVISION_MAP = {
+    "Quick": 1,
+    "Medium": 3,
+    "Detailed": 6
 }
 
 # --- Application Setup ---
@@ -40,10 +55,40 @@ if 'chunked_results' not in st.session_state:
     st.session_state['chunked_results'] = []
 if 'processing' not in st.session_state:
     st.session_state['processing'] = False
-if 'max_words_value' not in st.session_state:
-    st.session_state['max_words_value'] = 3000 # Default for Pro model
+
+# Initialize new session states for persistence and defaults
+if 'num_pages_select' not in st.session_state:
+    st.session_state['num_pages_select'] = "12+"
+if 'time_mode_select' not in st.session_state:
+    st.session_state['time_mode_select'] = "Medium" 
+if 'custom_word_count' not in st.session_state:
+    st.session_state['custom_word_count'] = 1500
+if 'custom_divisions' not in st.session_state:
+    st.session_state['custom_divisions'] = 3
+if 'settings_mode' not in st.session_state:
+    st.session_state['settings_mode'] = "Normal Settings"
 
 # --- 🔧 CORE HELPER FUNCTIONS ---
+
+def preprocess_transcript(text):
+    # (Implementation remains unchanged)
+    import re
+    pattern = r'\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?' 
+    matches = list(re.finditer(pattern, text))
+    segments = []
+    
+    if not matches:
+         if text:
+             return [{"time": "00:00", "text": text.strip()}]
+         return []
+
+    for i in range(len(matches)):
+        start = matches[i].end()
+        end = matches[i+1].start() if i + 1 < len(matches) else len(text)
+        ts = matches[i].group(1)
+        segments.append({"time": ts, "text": text[start:end].strip()})
+        
+    return segments
 
 def split_transcript_by_parts(transcript: str, num_parts: int) -> List[str]:
     """Splits transcript text into equal parts, clamping num_parts to avoid empty strings."""
@@ -61,7 +106,7 @@ def split_transcript_by_parts(transcript: str, num_parts: int) -> List[str]:
     return parts
 
 def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Combines outputs with robust merging and stable deduplication."""
+    # (Implementation remains unchanged)
     LIST_KEYS = list(LABEL_TO_KEY.values())
     
     combined: Dict[str, Any] = {"main_subject": ""}
@@ -70,7 +115,6 @@ def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         combined[key] = []
         
     for res in results:
-        # Normalize keys before merging to ensure structure is correct
         res_normalized = {LABEL_TO_KEY.get(k, k): v for k, v in res.items()}
         
         for k, v in res_normalized.items():
@@ -82,7 +126,6 @@ def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             if isinstance(v, list) and k in LIST_KEYS:
                 combined[k].extend(v)
     
-    # Final Deduplication Logic (Safe and Stable)
     for k in LIST_KEYS:
         if combined[k]:
             unique_items = []
@@ -99,32 +142,15 @@ def merge_all_json_outputs(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             
     return combined
 
-def update_word_limit_default():
-    """Sets the default max_words value based on the selected model using callback."""
-    model = st.session_state.get('model_choice_select', 'gemini-2.5-pro')
-    if model == "gemini-2.5-flash":
-        st.session_state['max_words_value'] = 1000 # Flash default
-    else: # Pro
-        st.session_state['max_words_value'] = 3000 # Pro default
-
-
 # --------------------------------------------------------------------------
-# --- Sidebar for User Inputs and Controls ---
+# --- Sidebar Setup and Conditional Logic ---
 # --------------------------------------------------------------------------
+
+# Set up the two-mode selector
 with st.sidebar:
     st.header("🔑 Configuration")
     
-    # 2. Model Selection Dropdown (with callback)
-    model_choice = st.selectbox(
-        "Select Gemini Model:",
-        options=["gemini-2.5-pro", "gemini-2.5-flash"],
-        index=0, 
-        key='model_choice_select', 
-        on_change=update_word_limit_default, 
-        help="Pro = better reasoning, 1M token context. Flash = cheaper, faster, smaller context."
-    )
-    
-    # 1. API Key Input
+    # 1. API Key Input (Always visible)
     api_key = st.text_input("Gemini API Key:", type="password")
     if api_key:
         st.session_state['api_key_valid'] = True
@@ -134,51 +160,111 @@ with st.sidebar:
         st.warning("Please enter your Gemini API Key.")
 
     st.markdown("---")
-
-    # 2. YouTube URL Input
-    yt_url = st.text_input("YouTube URL:")
-    video_id = get_video_id(yt_url)
-    if video_id:
-        st.success(f"Video ID found: {video_id}")
-    elif yt_url:
-        st.error("Invalid YouTube URL format.")
     
-    st.markdown("---")
-    st.header("⚙️ Analysis Controls")
-
-    # 3. Automatic Chunking Behavior (Adaptive UI)
-    is_flash = model_choice == "gemini-2.5-flash"
-    num_parts = 1 # Default for Pro
-
-    if is_flash:
-        st.subheader("Chunking Settings")
-        num_parts = st.number_input(
-            "Divide transcript into how many parts?",
-            min_value=1,
-            max_value=10,
-            value=3, # Default for Flash
-            step=1,
-            key='num_parts_input',
-            help="Split transcript into parts before sending to Gemini Flash."
-        )
-    else:
-        st.info("Gemini 2.5 Pro handles the full transcript in one call (no manual chunking needed).")
-
-    # A. Max Detail Length (Word Limit)
-    st.subheader("Max Detail Length")
-    max_words = st.number_input(
-        'Word Limit per Note Item:', 
-        min_value=50, 
-        max_value=10000, 
-        value=st.session_state['max_words_value'], 
-        step=50, 
-        key='max_words_input', 
-        help="Controls the word limit for each detail/explanation extracted by the AI."
+    # Mode Selector (Always visible)
+    settings_mode = st.radio(
+        "⚙️ Settings Mode", 
+        ["Normal Settings", "Advanced Custom Settings"], 
+        key='settings_mode'
     )
     
     st.markdown("---")
 
-    # B. Checkboxes for Section Selection
+    # --- Conditional Settings Panel ---
+    
+    # Initialize variables that will hold the final configuration values
+    final_max_words: int
+    final_num_divisions: int
+    
+    if settings_mode == "Normal Settings":
+        st.header("✨ Normal Settings")
+        
+        # 1. Number of Pages (Word Count Control)
+        st.subheader("Output Size (Normal)")
+        num_pages_choice = st.selectbox(
+            "Target PDF Length (Pages):",
+            options=list(PAGE_WORD_COUNT_MAP.keys()),
+            index=list(PAGE_WORD_COUNT_MAP.keys()).index(st.session_state.get('num_pages_select', "12+")),
+            key='num_pages_select', 
+            help="Controls the **total length** of the extracted summary."
+        )
+        # Determine the final max words based on the map
+        final_max_words = PAGE_WORD_COUNT_MAP.get(num_pages_choice, 3000)
+        st.markdown(f"**Target Word Count:** `{final_max_words}`")
+
+        st.markdown("---")
+        
+        # 2. Choose Time Mode (Transcript Division Control)
+        st.subheader("Processing Speed (Normal)")
+        time_mode_choice = st.selectbox(
+            "Chunking Mode:",
+            options=list(TIME_MODE_DIVISION_MAP.keys()),
+            index=list(TIME_MODE_DIVISION_MAP.keys()).index(st.session_state.get('time_mode_select', "Medium")),
+            key='time_mode_select', 
+            help="Fewer divisions = quicker processing; More divisions = better contextual density."
+        )
+        # Determine the final divisions based on the map
+        final_num_divisions = TIME_MODE_DIVISION_MAP[time_mode_choice]
+        st.markdown(f"**Transcript Divisions:** `{final_num_divisions}x`")
+
+    else: # Advanced Custom Settings
+        st.header("🔬 Advanced Custom Settings")
+        
+        # 1. Custom Word Count (Overrides Pages)
+        st.subheader("Output Size (Custom)")
+        custom_word_count = st.number_input(
+            'Custom Target Word Count:', 
+            min_value=500, 
+            max_value=10000, 
+            value=st.session_state.get('custom_word_count', 1500), 
+            step=100, 
+            key='custom_word_count', 
+            help="Set the precise word limit for the total output summary."
+        )
+        final_max_words = custom_word_count
+        st.markdown(f"**Target Word Count:** `{final_max_words}`")
+        
+        st.markdown("---")
+
+        # 2. Custom Transcript Divisions (Overrides Time Mode)
+        st.subheader("Processing Speed (Custom)")
+        custom_divisions = st.slider(
+            'Custom Transcript Divisions:',
+            min_value=1,
+            max_value=10,
+            value=st.session_state.get('custom_divisions', 3),
+            step=1,
+            key='custom_divisions',
+            help="The number of parts the transcript will be split into for analysis."
+        )
+        final_num_divisions = custom_divisions
+        st.markdown(f"**Transcript Divisions:** `{final_num_divisions}x`")
+
+    st.markdown("---")
+    
+    # Model Selection (Always visible, regardless of mode)
+    model_choice = st.selectbox(
+        "Model Selection:",
+        options=["gemini-2.5-pro", "gemini-2.5-flash"],
+        index=0, 
+        key='model_choice_select', 
+        help="Pro = better reasoning, 1M token context. Flash = cheaper, faster, smaller context."
+    )
+
+    st.markdown("---")
+    
+    # 4. YouTube URL Input (Always visible)
+    yt_url = st.text_input("YouTube URL (Optional):", help="Provide a URL to enable hyperlinked timestamps in the PDF.")
+    video_id = get_video_id(yt_url)
+    if video_id:
+        st.success(f"Video ID found: {video_id}")
+    elif yt_url:
+        st.warning("Invalid YouTube URL format. Timestamps will not be hyperlinked.")
+    
+    st.markdown("---")
+    st.header("⚙️ Analysis Details")
+    
+    # B. Checkboxes for Section Selection (Always visible)
     section_options = {
         'Topic Breakdown': True, 'Key Vocabulary': True,
         'Formulas & Principles': True, 'Teacher Insights': False, 
@@ -194,7 +280,7 @@ with st.sidebar:
 
     st.markdown("---")
     
-    # G. Custom Filename Input
+    # G. Custom Filename Input (Always visible)
     if video_id:
         st.session_state['output_filename_base'] = f"Notes_{video_id}"
     
@@ -220,26 +306,25 @@ format_choice = st.radio(
 )
 st.markdown("---")
 
-
 st.subheader("Transcript Input")
 transcript_text = st.text_area(
-    '3. Paste the video transcript here (must include timestamps):',
+    'Paste the video transcript here (must include timestamps for best results):',
     height=300,
     placeholder="[00:00] Welcome to the lesson. [00:45] We start with Topic A..."
 )
 
 # Optional Transcript Warning
 if len(transcript_text) > WARNING_THRESHOLD_CHARS and model_choice == "gemini-2.5-flash":
-    st.warning(f"⚠️ **Long Transcript Detected!** The text is over {WARNING_THRESHOLD_CHARS} characters. We recommend selecting **Gemini 2.5 Pro** or dividing the transcript into **4 or more parts** to avoid context overflow with Flash.")
+    st.warning(f"⚠️ **Long Transcript Detected!** The text is over {WARNING_THRESHOLD_CHARS} characters. We recommend selecting **Gemini 2.5 Pro** or increasing the divisions to avoid context overflow with Flash.")
 
 user_prompt_input = st.text_area(
-    '4. Refine AI Focus (Optional Prompt):',
+    'Refine AI Focus (Optional Prompt):',
     value="Ensure the output is highly condensed and only focus on practical applications and examples.",
     height=100
 )
 
 # E. The Analysis Trigger Button
-can_run = transcript_text and video_id and st.session_state['api_key_valid']
+can_run = transcript_text and st.session_state['api_key_valid']
 run_analysis = st.button(
     f"🚀 Generate Notes using {model_choice}", 
     type="primary", 
@@ -249,22 +334,32 @@ run_analysis = st.button(
 is_easy_read = format_choice.startswith("Easier Read")
 
 if run_analysis and not st.session_state['processing']:
+    
+    # Print the active configuration for debugging
+    print(f"\n--- DEBUG RUN START ---")
+    print(f"| Settings Mode: {settings_mode}")
+    print(f"| Final Max Words: {final_max_words}")
+    print(f"| Final Divisions: {final_num_divisions}")
+    print(f"| Model: {model_choice}")
+    print(f"| Video ID: {video_id}")
+    print(f"--- DEBUG RUN END ---")
+    
     st.session_state['processing'] = True
     st.session_state['chunked_results'] = []
     
     try:
-        # 4. Transcript Splitting Logic
-        if is_flash:
-            transcript_parts = split_transcript_by_parts(transcript_text, int(num_parts))
-        else:
-            transcript_parts = [transcript_text] # Pro runs the full transcript in one part
+        # Determine the number of parts to use (1 for Pro, or the configured division count)
+        num_parts_to_use = 1 
+        if model_choice == "gemini-2.5-flash":
+            num_parts_to_use = final_num_divisions
         
-        st.info(f"Analyzing in **{len(transcript_parts)}** sequential part(s) using **{model_choice}**.")
+        transcript_parts = split_transcript_by_parts(transcript_text, num_parts_to_use)
+        
+        st.info(f"Analyzing in **{len(transcript_parts)}** sequential part(s) using **{model_choice}** (Divisions: {num_parts_to_use}).")
 
-        # 6. Chunked Execution
+        # Chunked Execution
         status_bar = st.progress(0, text="Starting analysis...")
         
-        # Convert user labels to snake_case keys for the model prompt (FIX 1)
         sections_list_keys = [LABEL_TO_KEY.get(lbl, lbl) for lbl in sections_list]
 
         for i, part in enumerate(transcript_parts, start=1):
@@ -273,8 +368,11 @@ if run_analysis and not st.session_state['processing']:
                 text=f'Analyzing Part {i} of {len(transcript_parts)}... (Model: {model_choice})'
             )
             
+            preprocessed_part = preprocess_transcript(part)
+
+            # Pass the currently configured max_words (final_max_words)
             data_json, error_msg, full_prompt = run_analysis_and_summarize(
-                api_key, part, max_words, sections_list_keys, user_prompt_input, model_choice, is_easy_read
+                api_key, preprocessed_part, final_max_words, sections_list_keys, user_prompt_input, model_choice, is_easy_read
             )
             
             if data_json:
