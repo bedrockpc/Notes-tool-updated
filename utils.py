@@ -486,14 +486,15 @@ def save_to_pdf(
             
             formatted_text = process_highlight_text(content_text, is_easy_read)
             
-            timestamp = item.get('time') if isinstance(item, dict) else None
-            if timestamp and base_url:
-                link_url = f"{base_url}&t={int(timestamp)}s"
-                ts_formatted = format_timestamp(int(timestamp))
-                formatted_text = f'{formatted_text} <font color="#1976D2" size="8"><b>[{ts_formatted}]</b></font>'
-            
-            story.append(Paragraph(f"• {formatted_text}", body_style))
-        
+ timestamp = item.get('time') if isinstance(item, dict) else None
+            if timestamp and base_url:
+                link_url = f"{base_url}&t={int(timestamp)}s"
+                ts_formatted = format_timestamp(int(timestamp))
+                # These two lines MUST be indented like the ones above them
+                link_tag = f'<font color="#1976D2" size="8"><b><a href="{link_url}">[{ts_formatted}]</a></b></font>'
+                formatted_text = f'{formatted_text} {link_tag}' # <--- Corrected indentation
+            
+            story.append(Paragraph(f"• {formatted_text}", body_style))
         # Section spacing
         story.append(Spacer(1, 0.2*inch if is_easy_read else 0.12*inch))
     
