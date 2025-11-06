@@ -5,3 +5,6 @@ pandas
 openpyxl
 python-docx
 python-dotenv 
+streamlit>=1.28.0
+google-generativeai>=0.3.0
+reportlab>=4.0.0
