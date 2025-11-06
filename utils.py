@@ -4,16 +4,52 @@ import json
 import re
 from pathlib import Path
 import google.generativeai as genai
-from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from reportlab.lib.colors import HexColor, black, blue
-from reportlab.pdfgen import canvas
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
+from reportlab.lib.colors import HexColor, white
+from reportlab.platypus.flowables import Flowable
+from reportlab.pdfgen import canvas as pdfcanvas
 from io import BytesIO
 import time
 from typing import Optional, Tuple, Dict, Any, List
+
+# --- MODERN COLOR PALETTE ---
+COLORS = {
+    # Primary palette (vibrant & professional)
+    "primary": HexColor("#1E88E5"),       # Vibrant blue
+    "primary_dark": HexColor("#1565C0"),  # Darker blue
+    "secondary": HexColor("#26A69A"),     # Teal accent
+    "accent": HexColor("#FF6F00"),        # Orange accent
+    
+    # Text colors
+    "text_dark": HexColor("#212121"),     # Almost black
+    "text_medium": HexColor("#424242"),   # Dark grey
+    "text_light": HexColor("#757575"),    # Medium grey
+    
+    # Background colors
+    "bg_section": HexColor("#E3F2FD"),    # Light blue background
+    "bg_highlight": HexColor("#FFF59D"),  # Yellow highlight
+    "bg_card": HexColor("#FAFAFA"),       # Off-white card
+    
+    # Link color
+    "link": HexColor("#1976D2"),          # Blue link
+}
+
+# Section icons/emojis
+SECTION_ICONS = {
+    "topic_breakdown": "📚",
+    "key_vocabulary": "📖",
+    "formulas_and_principles": "🔬",
+    "teacher_insights": "💡",
+    "exam_focus_points": "⭐",
+    "common_mistakes_explained": "⚠️",
+    "key_points": "✨",
+    "short_tricks": "⚡",
+    "must_remembers": "🧠"
+}
 
 # --- Configuration and Constants ---
 EXPECTED_KEYS = [
@@ -22,17 +58,6 @@ EXPECTED_KEYS = [
     "exam_focus_points", "common_mistakes_explained", 
     "key_points", "short_tricks", "must_remembers" 
 ]
-
-# Modern color palette
-COLORS = {
-    "primary": HexColor("#2C3E50"),      # Dark blue-grey
-    "secondary": HexColor("#3498DB"),     # Bright blue
-    "accent": HexColor("#E74C3C"),        # Red accent
-    "highlight": HexColor("#F39C12"),     # Orange highlight
-    "text": HexColor("#2C3E50"),          # Main text
-    "link": HexColor("#3498DB"),          # Links
-    "bg_highlight": HexColor("#FFF9C4"),  # Yellow highlight background
-}
 
 # Improved System Prompt
 SYSTEM_PROMPT = """
@@ -76,7 +101,7 @@ def inject_custom_css():
             line-height: 1.6;
         }
         .stButton>button {
-            background: linear-gradient(90deg, #3498DB, #2C3E50);
+            background: linear-gradient(90deg, #1E88E5, #1565C0);
             color: white;
             border: none;
             padding: 0.75rem 2rem;
@@ -86,7 +111,7 @@ def inject_custom_css():
         }
         .stButton>button:hover {
             transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(52, 152, 219, 0.3);
+            box-shadow: 0 4px 12px rgba(30, 136, 229, 0.3);
         }
         </style>
     """, unsafe_allow_html=True)
@@ -116,15 +141,12 @@ def extract_gemini_text(response) -> Optional[str]:
 
 def extract_clean_json(response_text: str) -> Optional[str]:
     """Extract JSON from response with markdown cleanup"""
-    # Remove markdown code blocks
     cleaned = re.sub(r'```json\s*|\s*```', '', response_text)
-    
-    # Find JSON object
     match = re.search(r'\{.*\}', cleaned, re.DOTALL)
     if match:
         json_str = match.group(0)
         try:
-            json.loads(json_str)  # Validate
+            json.loads(json_str)
             return json_str
         except json.JSONDecodeError:
             pass
@@ -138,8 +160,8 @@ def format_timestamp(seconds: int) -> str:
     secs = seconds % 60
     
     if hours > 0:
-        return f"[{hours:02d}:{minutes:02d}:{secs:02d}]"
-    return f"[{minutes:02d}:{secs:02d}]"
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 def get_content_text(item):
     """Extract text content from various item structures"""
@@ -166,7 +188,6 @@ def run_analysis_and_summarize(
     
     sections_str = ", ".join(sections_list_keys)
     
-    # Build prompt
     highlighting_instruction = (
         "4. **Highlighting:** Wrap 2-4 critical words in <hl>text</hl> tags."
         if is_easy_read else
@@ -197,7 +218,6 @@ USER PREFERENCES: {user_prompt}
         if not response_text:
             return None, "Empty API response", full_prompt
         
-        # Debug output
         print(f"\n{'='*60}")
         print(f"RAW API RESPONSE (first 800 chars):\n{response_text[:800]}")
         print(f"{'='*60}\n")
@@ -208,21 +228,18 @@ USER PREFERENCES: {user_prompt}
         
         json_data = json.loads(json_str)
         
-        # Normalize keys to snake_case
         def to_snake_case(s):
             s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', s)
             return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
         
         json_data = {to_snake_case(k): v for k, v in json_data.items()}
         
-        # Ensure all keys exist with correct types
         for key in EXPECTED_KEYS:
             if key not in json_data:
                 json_data[key] = "" if key == "main_subject" else []
             elif key != "main_subject" and not isinstance(json_data[key], list):
                 json_data[key] = [json_data[key]] if json_data[key] else []
         
-        # Debug output
         print(f"✅ EXTRACTED KEYS: {list(json_data.keys())}")
         for k, v in json_data.items():
             if k != "main_subject":
@@ -235,35 +252,86 @@ USER PREFERENCES: {user_prompt}
     except Exception as e:
         return None, f"API Error: {e}", full_prompt
 
-# --- PDF GENERATION (Modern ReportLab) ---
+# --- CUSTOM FLOWABLE FOR SECTION HEADER ---
+class SectionHeader(Flowable):
+    """Custom section header with colored background box"""
+    
+    def __init__(self, text, icon="", width=6.5*inch, is_easy_read=False):
+        Flowable.__init__(self)
+        self.text = text
+        self.icon = icon
+        self.width = width
+        self.height = 0.4*inch if is_easy_read else 0.35*inch
+        self.is_easy_read = is_easy_read
+    
+    def draw(self):
+        canvas = self.canv
+        
+        # Draw colored background box
+        canvas.setFillColor(COLORS['primary'])
+        canvas.rect(0, 0, self.width, self.height, fill=1, stroke=0)
+        
+        # Draw text in white
+        canvas.setFillColor(white)
+        canvas.setFont("Helvetica-Bold", 13 if self.is_easy_read else 12)
+        
+        text_with_icon = f"{self.icon} {self.text}" if self.icon else self.text
+        canvas.drawString(12, self.height/2 - 5, text_with_icon)
+
+# --- CUSTOM PAGE TEMPLATE WITH FOOTER ---
+class NumberedCanvas(pdfcanvas.Canvas):
+    """Canvas with page numbers and footer"""
+    
+    def __init__(self, *args, **kwargs):
+        self.video_title = kwargs.pop('video_title', 'Video Notes')
+        pdfcanvas.Canvas.__init__(self, *args, **kwargs)
+        self._saved_page_states = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        num_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.draw_page_footer(num_pages)
+            pdfcanvas.Canvas.showPage(self)
+        pdfcanvas.Canvas.save(self)
+
+    def draw_page_footer(self, page_count):
+        self.saveState()
+        self.setFont('Helvetica', 8)
+        self.setFillColor(COLORS['text_light'])
+        
+        # Left: Video title
+        self.drawString(0.75*inch, 0.5*inch, self.video_title[:50])
+        
+        # Right: Page number
+        page_num = f"Page {self._pageNumber} of {page_count}"
+        self.drawRightString(letter[0] - 0.75*inch, 0.5*inch, page_num)
+        
+        # Center: App branding
+        self.drawCentredString(letter[0]/2, 0.5*inch, "Generated by AI Notes Generator")
+        
+        self.restoreState()
+
+# --- PDF GENERATION ---
 
 def create_custom_styles(is_easy_read: bool):
-    """Create modern PDF styles"""
+    """Create professional PDF styles with proper spacing"""
     styles = getSampleStyleSheet()
     
     # Title style
     styles.add(ParagraphStyle(
         name='CustomTitle',
         parent=styles['Heading1'],
-        fontSize=24,
-        textColor=COLORS['primary'],
-        spaceAfter=12 if is_easy_read else 8,
+        fontSize=26,
+        textColor=COLORS['primary_dark'],
+        spaceAfter=18 if is_easy_read else 12,
+        spaceBefore=6,
         alignment=TA_CENTER,
         fontName='Helvetica-Bold'
-    ))
-    
-    # Section heading
-    styles.add(ParagraphStyle(
-        name='SectionHead',
-        parent=styles['Heading2'],
-        fontSize=14,
-        textColor=COLORS['secondary'],
-        spaceBefore=10 if is_easy_read else 6,
-        spaceAfter=6 if is_easy_read else 4,
-        fontName='Helvetica-Bold',
-        borderPadding=(0, 0, 2, 0),
-        borderColor=COLORS['secondary'],
-        borderWidth=1
     ))
     
     # Topic heading (for nested structures)
@@ -271,48 +339,65 @@ def create_custom_styles(is_easy_read: bool):
         name='TopicHead',
         parent=styles['Normal'],
         fontSize=11,
-        textColor=COLORS['primary'],
-        spaceBefore=6 if is_easy_read else 3,
-        spaceAfter=3 if is_easy_read else 2,
+        textColor=COLORS['text_dark'],
+        spaceBefore=10 if is_easy_read else 6,
+        spaceAfter=6 if is_easy_read else 3,
         fontName='Helvetica-Bold',
-        leftIndent=0
+        leftIndent=8
     ))
     
-    # Body text
+    # Body text - DEFAULT MODE (COMPACT)
     styles.add(ParagraphStyle(
         name='CustomBody',
         parent=styles['Normal'],
         fontSize=10,
-        textColor=COLORS['text'],
-        leading=16 if is_easy_read else 13,
-        spaceBefore=2 if is_easy_read else 1,
-        spaceAfter=4 if is_easy_read else 2,
-        leftIndent=15,
+        textColor=COLORS['text_dark'],
+        leading=14,  # Tight line spacing for default
+        spaceBefore=2,  # Minimal space before
+        spaceAfter=4,   # Minimal space after
+        leftIndent=20,
+        rightIndent=10,
         fontName='Helvetica'
     ))
     
-    # Timestamp link
+    # Body text - EASY READ MODE (SPACIOUS)
     styles.add(ParagraphStyle(
-        name='Timestamp',
+        name='CustomBodySpacious',
         parent=styles['Normal'],
-        fontSize=9,
+        fontSize=10,
+        textColor=COLORS['text_dark'],
+        leading=18,  # INCREASED line spacing (was 16)
+        spaceBefore=6,  # MORE space before (was 2)
+        spaceAfter=8,   # MORE space after (was 4)
+        leftIndent=20,
+        rightIndent=10,
+        fontName='Helvetica'
+    ))
+    
+    # Timestamp badge style
+    styles.add(ParagraphStyle(
+        name='TimestampBadge',
+        parent=styles['Normal'],
+        fontSize=8,
         textColor=COLORS['link'],
         fontName='Helvetica-Bold',
-        alignment=TA_LEFT
+        alignment=TA_LEFT,
+        backColor=HexColor("#E3F2FD"),
+        borderPadding=2,
+        borderRadius=3
     ))
     
     return styles
 
 def process_highlight_text(text: str, is_easy_read: bool) -> str:
-    """Convert <hl> tags to ReportLab formatting"""
+    """Convert <hl> tags to ReportLab formatting with improved contrast"""
     if not is_easy_read:
-        # Remove all highlight tags for default mode
         return re.sub(r'<hl>(.*?)</hl>', r'\1', text)
     
-    # Convert to ReportLab's background color syntax
+    # Enhanced highlighting: yellow background + bold orange text
     return re.sub(
         r'<hl>(.*?)</hl>',
-        r'<span backcolor="#FFF9C4" color="#E65100"><b>\1</b></span>',
+        r'<span backcolor="#FFF59D" color="#E65100"><b>\1</b></span>',
         text
     )
 
@@ -323,37 +408,48 @@ def save_to_pdf(
     output: BytesIO, 
     format_choice: str = "Default (Compact)"
 ):
-    """Generate modern PDF with ReportLab"""
+    """Generate professional PDF with enhanced design"""
     
     is_easy_read = format_choice.startswith("Easier Read")
     base_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else None
     
-    # Create PDF document
+    # Get video title for footer
+    video_title = data.get("main_subject", "Video Study Notes")
+    
+    # Create PDF with custom canvas (for footer)
     doc = SimpleDocTemplate(
         output,
         pagesize=letter,
         rightMargin=0.75*inch,
         leftMargin=0.75*inch,
         topMargin=0.75*inch,
-        bottomMargin=0.75*inch
+        bottomMargin=0.75*inch,
+        title=video_title
     )
     
     story = []
     styles = create_custom_styles(is_easy_read)
     
-    # Title
-    title = data.get("main_subject", "Video Study Notes")
-    story.append(Paragraph(title, styles['CustomTitle']))
-    story.append(Spacer(1, 0.2*inch if is_easy_read else 0.1*inch))
+    # Select body style based on mode
+    body_style = styles['CustomBodySpacious'] if is_easy_read else styles['CustomBody']
+    
+    # Title with extra padding
+    story.append(Spacer(1, 0.1*inch))
+    story.append(Paragraph(video_title, styles['CustomTitle']))
+    story.append(Spacer(1, 0.25*inch if is_easy_read else 0.15*inch))
     
     # Process each section
     for section_key, section_content in data.items():
         if section_key == "main_subject" or not isinstance(section_content, list) or not section_content:
             continue
         
-        # Section heading
+        # Get section name and icon
         heading = section_key.replace("_", " ").title()
-        story.append(Paragraph(heading, styles['SectionHead']))
+        icon = SECTION_ICONS.get(section_key, "📌")
+        
+        # Add section header with colored box
+        story.append(SectionHeader(heading, icon, is_easy_read=is_easy_read))
+        story.append(Spacer(1, 0.15*inch if is_easy_read else 0.1*inch))
         
         # Handle nested topic breakdown
         if section_key == 'topic_breakdown':
@@ -367,18 +463,19 @@ def save_to_pdf(
                     if not detail_text.strip():
                         continue
                     
-                    # Process highlighting
                     formatted_text = process_highlight_text(detail_text, is_easy_read)
                     
-                    # Add timestamp link if available
                     timestamp = detail.get('time')
                     if timestamp and base_url:
                         link_url = f"{base_url}&t={int(timestamp)}s"
                         ts_formatted = format_timestamp(int(timestamp))
-                        formatted_text = f'{formatted_text} <a href="{link_url}" color="blue">{ts_formatted}</a>'
+                        # Styled timestamp badge
+                        formatted_text = f'{formatted_text} <font color="#1976D2" size="8"><b>[{ts_formatted}]</b></font>'
                     
-                    story.append(Paragraph(formatted_text, styles['CustomBody']))
+                    story.append(Paragraph(formatted_text, body_style))
             
+            # Extra spacing after section
+            story.append(Spacer(1, 0.2*inch if is_easy_read else 0.12*inch))
             continue
         
         # Handle flat sections
@@ -387,23 +484,24 @@ def save_to_pdf(
             if not content_text.strip():
                 continue
             
-            # Process highlighting
             formatted_text = process_highlight_text(content_text, is_easy_read)
             
-            # Add timestamp
             timestamp = item.get('time') if isinstance(item, dict) else None
             if timestamp and base_url:
                 link_url = f"{base_url}&t={int(timestamp)}s"
                 ts_formatted = format_timestamp(int(timestamp))
-                formatted_text = f'{formatted_text} <a href="{link_url}" color="blue">{ts_formatted}</a>'
+                formatted_text = f'{formatted_text} <font color="#1976D2" size="8"><b>[{ts_formatted}]</b></font>'
             
-            story.append(Paragraph(f"• {formatted_text}", styles['CustomBody']))
+            story.append(Paragraph(f"• {formatted_text}", body_style))
         
-        # Add spacing between sections
-        story.append(Spacer(1, 0.15*inch if is_easy_read else 0.08*inch))
+        # Section spacing
+        story.append(Spacer(1, 0.2*inch if is_easy_read else 0.12*inch))
     
-    # Build PDF
-    doc.build(story)
+    # Build PDF with custom canvas
+    doc.build(
+        story,
+        canvasmaker=lambda *args, **kwargs: NumberedCanvas(*args, video_title=video_title, **kwargs)
+    )
     output.seek(0)
     
-    print(f"\n✅ PDF generated successfully ({len(story)} elements)")
+    print(f"\n✅ PDF generated successfully ({len(story)} elements, Easy Read: {is_easy_read})")
