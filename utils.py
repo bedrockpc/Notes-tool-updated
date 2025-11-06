@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
-import os
 import json
 import re
 from pathlib import Path
 import google.generativeai as genai
-# --- UPDATED IMPORT FOR FPDF2 ---
-from fpdf.v2 import FPDF 
-# ---------------------------------
-from fpdf.enums import XPos, YPos
-from io import BytesIO 
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.lib.colors import HexColor, black, blue
+from reportlab.pdfgen import canvas
+from io import BytesIO
 import time
-from typing import Optional, Tuple, Dict, Any, List 
+from typing import Optional, Tuple, Dict, Any, List
 
 # --- Configuration and Constants ---
-
 EXPECTED_KEYS = [
     "main_subject", "topic_breakdown", "key_vocabulary",
     "formulas_and_principles", "teacher_insights",
@@ -22,252 +23,387 @@ EXPECTED_KEYS = [
     "key_points", "short_tricks", "must_remembers" 
 ]
 
-# --- Enhanced Color Palette with Visual Hierarchy ---
+# Modern color palette
 COLORS = {
-    "title_bg": (40, 54, 85),           # Navy
-    "title_text": (255, 255, 255),       # White
-    "topic_breakdown_bg": (74, 163, 223),     # Sky Blue
-    "topic_breakdown_text": (255, 255, 255),
-    "key_vocabulary_bg": (255, 165, 0),       # Orange
-    "key_vocabulary_text": (0, 0, 0),
-    "formulas_and_principles_bg": (155, 89, 182),  # Purple
-    "formulas_and_principles_text": (255, 255, 255),
-    "teacher_insights_bg": (39, 174, 96),     # Green
-    "teacher_insights_text": (255, 255, 255),
-    "exam_focus_points_bg": (231, 76, 60),    # Red
-    "exam_focus_points_text": (255, 255, 255),
-    "common_mistakes_explained_bg": (52, 73, 94),  # Dark Gray
-    "common_mistakes_explained_text": (255, 255, 255),
-    "key_points_bg": (41, 128, 185),          # Blue
-    "key_points_text": (255, 255, 255),
-    "short_tricks_bg": (241, 196, 15),        # Yellow
-    "short_tricks_text": (0, 0, 0),
-    "must_remembers_bg": (22, 160, 133),      # Teal
-    "must_remembers_text": (255, 255, 255),
-    "default_bg": (40, 54, 85),               # Fallback Navy
-    "default_text": (255, 255, 255),
-    "link_text": (0, 102, 204),               # Blue for links
-    "body_text": (30, 30, 30),                # Dark gray for body
-    "line": (220, 220, 220),                  # Light gray for lines
-    "highlight_bg": (255, 255, 0),            # Yellow highlight
-    "highlight_text": (0, 0, 0)               # Black text on highlight
+    "primary": HexColor("#2C3E50"),      # Dark blue-grey
+    "secondary": HexColor("#3498DB"),     # Bright blue
+    "accent": HexColor("#E74C3C"),        # Red accent
+    "highlight": HexColor("#F39C12"),     # Orange highlight
+    "text": HexColor("#2C3E50"),          # Main text
+    "link": HexColor("#3498DB"),          # Links
+    "bg_highlight": HexColor("#FFF9C4"),  # Yellow highlight background
 }
 
-# --- CORE UTILITY FUNCTIONS (Unchanged) ---
-# ... (inject_custom_css, get_video_id, extract_gemini_text, extract_clean_json, 
-# get_content_text, format_timestamp, ensure_valid_youtube_url, 
-# build_simplified_prompt, run_analysis_and_summarize remain the same)
-# ...
+# Improved System Prompt
+SYSTEM_PROMPT = """
+You are an expert academic content analyzer. Extract structured study notes from video transcripts.
 
-# --- PDF Class with FIXED Layout Management ---
-class PDF(FPDF):
-    def __init__(self, font_path, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.font_name = "NotoSans"
+INPUT FORMAT: JSON array of segments: [{"time": seconds, "text": "content"}]
+
+OUTPUT: Valid JSON object with these exact keys (use snake_case):
+{
+  "main_subject": "Brief subject description",
+  "topic_breakdown": [{"topic": "Name", "details": [{"detail": "Content", "time": 120}]}],
+  "key_vocabulary": [{"term": "Word", "definition": "Meaning", "time": 150}],
+  "formulas_and_principles": [{"formula_or_principle": "Name", "explanation": "Description", "time": 180}],
+  "teacher_insights": [{"insight": "Tip", "time": 210}],
+  "exam_focus_points": [{"point": "Important concept", "time": 240}],
+  "common_mistakes_explained": [{"mistake": "Error", "explanation": "Why it's wrong", "time": 270}],
+  "key_points": [{"text": "Main point", "time": 300}],
+  "short_tricks": [{"text": "Quick method", "time": 330}],
+  "must_remembers": [{"text": "Critical fact", "time": 360}]
+}
+
+RULES:
+1. Use EXACT 'time' values from input (in seconds)
+2. For highlighting mode: Wrap 2-4 critical words in <hl>text</hl> tags
+3. Keep content concise and academic
+4. Return ONLY valid JSON (no markdown, no comments)
+5. Fill ALL requested sections with available content
+"""
+
+# --- UTILITY FUNCTIONS ---
+
+def inject_custom_css():
+    """Modern CSS styling"""
+    st.markdown("""
+        <style>
+        .stApp {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        }
+        p, label, .stMarkdown {
+            font-size: 1.05rem !important;
+            line-height: 1.6;
+        }
+        .stButton>button {
+            background: linear-gradient(90deg, #3498DB, #2C3E50);
+            color: white;
+            border: none;
+            padding: 0.75rem 2rem;
+            font-weight: 600;
+            border-radius: 8px;
+            transition: transform 0.2s;
+        }
+        .stButton>button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(52, 152, 219, 0.3);
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+def get_video_id(url: str) -> Optional[str]:
+    """Extract YouTube video ID"""
+    patterns = [
+        r"(?<=v=)[^&#?]+", r"(?<=be/)[^&#?]+", r"(?<=live/)[^&#?]+",
+        r"(?<=embed/)[^&#?]+", r"(?<=shorts/)[^&#?]+"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(0)
+    return None
+
+def extract_gemini_text(response) -> Optional[str]:
+    """Extract text from Gemini API response"""
+    if hasattr(response, 'text'):
+        return response.text
+    if hasattr(response, 'candidates') and response.candidates:
         try:
-            # Assumes font files are in the directory specified by font_path (main folder)
-            self.add_font(self.font_name, "", str(font_path / "NotoSans-Regular.ttf"))
-            self.add_font(self.font_name, "B", str(font_path / "NotoSans-Bold.ttf"))
-        except Exception:
-            self.font_name = "Arial"
-            print(f"WARNING: Could not load NotoSans font. Falling back to {self.font_name}.")
+            return response.candidates[0].content.parts[0].text
+        except (AttributeError, IndexError):
+            pass
+    return None
 
-    def create_title(self, title):
-        """Creates title with fixed spacing."""
-        self.ln(15)  # Space from top
-        self.set_font(self.font_name, "B", 26)
-        self.set_fill_color(*COLORS["title_bg"])
-        self.set_text_color(*COLORS["title_text"])
-        self.cell(0, 28, title, align="C", fill=True)
-        # --- FIX: Reduced spacing after title (from 18 to 10) ---
-        self.ln(10)  
-        self.set_text_color(*COLORS["body_text"])  # Reset text color
-
-    def create_section_heading(self, heading, section_key):
-        """Creates colored section heading with fixed spacing."""
-        self.ln(5)  # Space before heading
-        
-        # Get section-specific colors
-        bg_key = f"{section_key}_bg"
-        text_key = f"{section_key}_text"
-        bg_color = COLORS.get(bg_key, COLORS["default_bg"])
-        text_color = COLORS.get(text_key, COLORS["default_text"])
-        
-        self.set_font(self.font_name, "B", 14)
-        self.set_fill_color(*bg_color)
-        self.set_text_color(*text_color)
-        self.cell(0, 10, heading, fill=True)
-        # --- FIX: Reduced spacing after heading (from 8 to 4) ---
-        self.ln(4)
-        
-        # Reset colors
-        self.set_fill_color(255, 255, 255)
-        self.set_text_color(*COLORS["body_text"])
-
-    def write_text_with_highlights(self, text, line_height=6):
-        """
-        FIXED: Writes text with inline highlights using write(), 
-        preventing excessive vertical space caused by multi_cell.
-        """
-        parts = re.split(r'(<hl>.*?</hl>)', text)
-        
-        self.set_font(self.font_name, '', 11)
-        self.set_text_color(*COLORS["body_text"])
-        
-        # Use available width for wrapping logic
-        max_x = self.w - self.r_margin
-
-        for part in parts:
-            if part.startswith('<hl>'):
-                # Highlighted portion
-                highlight_text = part[4:-5]
-                
-                # Setup highlight style
-                self.set_fill_color(*COLORS["highlight_bg"])
-                self.set_text_color(*COLORS["highlight_text"])
-                self.set_font(self.font_name, 'B', 11)
-                
-                # Check if the part fits on the current line (simplified check)
-                part_width = self.get_string_width(highlight_text)
-                if self.get_x() + part_width > max_x:
-                    self.ln(line_height) # Force line break if it doesn't fit
-                
-                # Use write() to keep content inline
-                self.write(line_height, highlight_text + " ", fill=True) # Added space after highlight
-                
-                # Reset after highlight
-                self.set_fill_color(255, 255, 255)
-                self.set_text_color(*COLORS["body_text"])
-                self.set_font(self.font_name, '', 11)
-            else:
-                # Normal text
-                if part.strip():
-                    part_width = self.get_string_width(part)
-                    if self.get_x() + part_width > max_x:
-                        self.ln(line_height) # Force line break if it doesn't fit
-                        
-                    self.write(line_height, part)
-
-    def add_timestamp_link(self, timestamp, video_id, base_url):
-        """Adds timestamp link, correctly positioned."""
-        if timestamp and video_id:
-            link_url = f"{base_url}&t={timestamp}s"
-            
-            # Save current Y position
-            current_y = self.get_y()
-            
-            # Move to right side for timestamp, relative to current line
-            self.set_xy(self.w - self.r_margin - 35, current_y - 6)
-            
-            # Write timestamp link
-            self.set_text_color(*COLORS["link_text"])
-            self.set_font(self.font_name, 'B', 9)
-            self.cell(35, 6, format_timestamp(int(timestamp)), link=link_url, align="R")
-            
-            # Reset position and move down
-            self.set_xy(self.l_margin, current_y)
-            self.ln(4)
-            
-            # Reset color
-            self.set_text_color(*COLORS["body_text"])
-
-
-def save_to_pdf(data: dict, video_id: Optional[str], font_path: Path, output, format_choice: str = "Default (Compact)"):
-    """Generates PDF from extracted data with fixed layout management."""
+def extract_clean_json(response_text: str) -> Optional[str]:
+    """Extract JSON from response with markdown cleanup"""
+    # Remove markdown code blocks
+    cleaned = re.sub(r'```json\s*|\s*```', '', response_text)
     
-    # ... (Debug prints remain the same)
+    # Find JSON object
+    match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if match:
+        json_str = match.group(0)
+        try:
+            json.loads(json_str)  # Validate
+            return json_str
+        except json.JSONDecodeError:
+            pass
+    return None
+
+def format_timestamp(seconds: int) -> str:
+    """Convert seconds to [MM:SS] or [HH:MM:SS]"""
+    seconds = int(seconds)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
     
-    base_url = ensure_valid_youtube_url(video_id) if video_id else "#"
+    if hours > 0:
+        return f"[{hours:02d}:{minutes:02d}:{secs:02d}]"
+    return f"[{minutes:02d}:{secs:02d}]"
+
+def get_content_text(item):
+    """Extract text content from various item structures"""
+    if isinstance(item, dict):
+        for key in ['detail', 'explanation', 'point', 'text', 'definition', 
+                    'formula_or_principle', 'insight', 'mistake', 'content']:
+            if key in item and item[key]:
+                return str(item[key])
+    return str(item) if item else ''
+
+# --- API INTERACTION ---
+
+@st.cache_data(ttl=0)
+def run_analysis_and_summarize(
+    api_key: str, 
+    transcript_segments: List[Dict], 
+    max_words: int, 
+    sections_list_keys: list, 
+    user_prompt: str, 
+    model_name: str, 
+    is_easy_read: bool
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], str]:
+    """Call Gemini API and return structured JSON"""
     
-    pdf = PDF(font_path=font_path)
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
+    sections_str = ", ".join(sections_list_keys)
+    
+    # Build prompt
+    highlighting_instruction = (
+        "4. **Highlighting:** Wrap 2-4 critical words in <hl>text</hl> tags."
+        if is_easy_read else
+        "4. **NO special tags:** Use plain text only."
+    )
+    
+    prompt_instructions = SYSTEM_PROMPT + f"""
+{highlighting_instruction}
+5. Target total length: ~{max_words} words across all sections
+6. Extract ONLY these categories: {sections_str}
+
+USER PREFERENCES: {user_prompt}
+"""
+    
+    transcript_json = json.dumps(transcript_segments, indent=2)
+    full_prompt = f"{prompt_instructions}\n\nTRANSCRIPT DATA:\n{transcript_json}"
+    
+    if not api_key:
+        return None, "API Key Missing", full_prompt
+    
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        
+        response = model.generate_content(full_prompt)
+        response_text = extract_gemini_text(response)
+        
+        if not response_text:
+            return None, "Empty API response", full_prompt
+        
+        # Debug output
+        print(f"\n{'='*60}")
+        print(f"RAW API RESPONSE (first 800 chars):\n{response_text[:800]}")
+        print(f"{'='*60}\n")
+        
+        json_str = extract_clean_json(response_text)
+        if not json_str:
+            return None, f"No valid JSON found in response", full_prompt
+        
+        json_data = json.loads(json_str)
+        
+        # Normalize keys to snake_case
+        def to_snake_case(s):
+            s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', s)
+            return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+        
+        json_data = {to_snake_case(k): v for k, v in json_data.items()}
+        
+        # Ensure all keys exist with correct types
+        for key in EXPECTED_KEYS:
+            if key not in json_data:
+                json_data[key] = "" if key == "main_subject" else []
+            elif key != "main_subject" and not isinstance(json_data[key], list):
+                json_data[key] = [json_data[key]] if json_data[key] else []
+        
+        # Debug output
+        print(f"✅ EXTRACTED KEYS: {list(json_data.keys())}")
+        for k, v in json_data.items():
+            if k != "main_subject":
+                print(f"   {k}: {len(v)} items")
+        
+        return json_data, None, full_prompt
+        
+    except json.JSONDecodeError as e:
+        return None, f"JSON Parse Error: {e}", full_prompt
+    except Exception as e:
+        return None, f"API Error: {e}", full_prompt
+
+# --- PDF GENERATION (Modern ReportLab) ---
+
+def create_custom_styles(is_easy_read: bool):
+    """Create modern PDF styles"""
+    styles = getSampleStyleSheet()
+    
+    # Title style
+    styles.add(ParagraphStyle(
+        name='CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor=COLORS['primary'],
+        spaceAfter=12 if is_easy_read else 8,
+        alignment=TA_CENTER,
+        fontName='Helvetica-Bold'
+    ))
+    
+    # Section heading
+    styles.add(ParagraphStyle(
+        name='SectionHead',
+        parent=styles['Heading2'],
+        fontSize=14,
+        textColor=COLORS['secondary'],
+        spaceBefore=10 if is_easy_read else 6,
+        spaceAfter=6 if is_easy_read else 4,
+        fontName='Helvetica-Bold',
+        borderPadding=(0, 0, 2, 0),
+        borderColor=COLORS['secondary'],
+        borderWidth=1
+    ))
+    
+    # Topic heading (for nested structures)
+    styles.add(ParagraphStyle(
+        name='TopicHead',
+        parent=styles['Normal'],
+        fontSize=11,
+        textColor=COLORS['primary'],
+        spaceBefore=6 if is_easy_read else 3,
+        spaceAfter=3 if is_easy_read else 2,
+        fontName='Helvetica-Bold',
+        leftIndent=0
+    ))
+    
+    # Body text
+    styles.add(ParagraphStyle(
+        name='CustomBody',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=COLORS['text'],
+        leading=16 if is_easy_read else 13,
+        spaceBefore=2 if is_easy_read else 1,
+        spaceAfter=4 if is_easy_read else 2,
+        leftIndent=15,
+        fontName='Helvetica'
+    ))
+    
+    # Timestamp link
+    styles.add(ParagraphStyle(
+        name='Timestamp',
+        parent=styles['Normal'],
+        fontSize=9,
+        textColor=COLORS['link'],
+        fontName='Helvetica-Bold',
+        alignment=TA_LEFT
+    ))
+    
+    return styles
+
+def process_highlight_text(text: str, is_easy_read: bool) -> str:
+    """Convert <hl> tags to ReportLab formatting"""
+    if not is_easy_read:
+        # Remove all highlight tags for default mode
+        return re.sub(r'<hl>(.*?)</hl>', r'\1', text)
+    
+    # Convert to ReportLab's background color syntax
+    return re.sub(
+        r'<hl>(.*?)</hl>',
+        r'<span backcolor="#FFF9C4" color="#E65100"><b>\1</b></span>',
+        text
+    )
+
+def save_to_pdf(
+    data: dict, 
+    video_id: Optional[str], 
+    font_path: Path, 
+    output: BytesIO, 
+    format_choice: str = "Default (Compact)"
+):
+    """Generate modern PDF with ReportLab"""
+    
+    is_easy_read = format_choice.startswith("Easier Read")
+    base_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else None
+    
+    # Create PDF document
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=letter,
+        rightMargin=0.75*inch,
+        leftMargin=0.75*inch,
+        topMargin=0.75*inch,
+        bottomMargin=0.75*inch
+    )
+    
+    story = []
+    styles = create_custom_styles(is_easy_read)
     
     # Title
-    main_title = data.get("main_subject", "Video Notes")
-    pdf.create_title(main_title)
-    
-    # Constants for indentation fix
-    BULLET_WIDTH = 5
-    TEXT_INDENT = 5
+    title = data.get("main_subject", "Video Study Notes")
+    story.append(Paragraph(title, styles['CustomTitle']))
+    story.append(Spacer(1, 0.2*inch if is_easy_read else 0.1*inch))
     
     # Process each section
     for section_key, section_content in data.items():
         if section_key == "main_subject" or not isinstance(section_content, list) or not section_content:
             continue
         
+        # Section heading
         heading = section_key.replace("_", " ").title()
-        pdf.create_section_heading(heading, section_key)
+        story.append(Paragraph(heading, styles['SectionHead']))
         
-        # --- Save initial margins for restoration ---
-        initial_l_margin = pdf.l_margin
-        initial_r_margin = pdf.r_margin
-        
-        for item in section_content:
-            # Handle nested topic breakdown (Logic unchanged, but benefits from better write_text_with_highlights)
-            if section_key == 'topic_breakdown':
-                # Topic name (bold)
+        # Handle nested topic breakdown
+        if section_key == 'topic_breakdown':
+            for item in section_content:
                 topic_name = item.get('topic', '')
-                pdf.set_font(pdf.font_name, "B", 12)
-                pdf.set_text_color(*COLORS["body_text"])
-                pdf.multi_cell(0, 7, f"• {topic_name}")
-                pdf.ln(2)
+                if topic_name:
+                    story.append(Paragraph(f"• {topic_name}", styles['TopicHead']))
                 
-                # Process nested details
                 for detail in item.get('details', []):
                     detail_text = get_content_text(detail)
                     if not detail_text.strip():
                         continue
                     
-                    # --- Indentation for details ---
-                    pdf.set_left_margin(initial_l_margin + BULLET_WIDTH + TEXT_INDENT)
-                    pdf.set_x(pdf.l_margin)
+                    # Process highlighting
+                    formatted_text = process_highlight_text(detail_text, is_easy_read)
                     
-                    # Write detail with highlights
-                    pdf.write_text_with_highlights(detail_text)
+                    # Add timestamp link if available
+                    timestamp = detail.get('time')
+                    if timestamp and base_url:
+                        link_url = f"{base_url}&t={int(timestamp)}s"
+                        ts_formatted = format_timestamp(int(timestamp))
+                        formatted_text = f'{formatted_text} <a href="{link_url}" color="blue">{ts_formatted}</a>'
                     
-                    # Add timestamp
-                    timestamp = detail.get("time") if isinstance(detail, dict) else None
-                    pdf.add_timestamp_link(timestamp, video_id, base_url)
-                    
-                    # --- Reset indentation after detail ---
-                    pdf.set_left_margin(initial_l_margin)
-                    pdf.set_x(initial_l_margin)
-                    pdf.ln(3)
-
-                pdf.ln(4)  # Extra space after topic
-                continue
-                
-            # Handle flat sections
+                    story.append(Paragraph(formatted_text, styles['CustomBody']))
+            
+            continue
+        
+        # Handle flat sections
+        for item in section_content:
             content_text = get_content_text(item)
             if not content_text.strip():
                 continue
             
-            # --- FIX: Margin-based bullet point implementation ---
+            # Process highlighting
+            formatted_text = process_highlight_text(content_text, is_easy_read)
             
-            # 1. Draw bullet point
-            pdf.set_font(pdf.font_name, '', 11)
-            pdf.set_text_color(*COLORS["body_text"])
-            pdf.cell(BULLET_WIDTH, 6, "•", new_x=XPos.RIGHT) # Use XPos.RIGHT to keep cursor flowing
+            # Add timestamp
+            timestamp = item.get('time') if isinstance(item, dict) else None
+            if timestamp and base_url:
+                link_url = f"{base_url}&t={int(timestamp)}s"
+                ts_formatted = format_timestamp(int(timestamp))
+                formatted_text = f'{formatted_text} <a href="{link_url}" color="blue">{ts_formatted}</a>'
             
-            # 2. Set temporary margin for text block
-            new_l_margin = initial_l_margin + BULLET_WIDTH + TEXT_INDENT
-            pdf.set_left_margin(new_l_margin)
-            pdf.set_x(new_l_margin)
-            
-            # 3. Write content with highlights (this handles wrapping internally now)
-            pdf.write_text_with_highlights(content_text)
-            
-            # 4. Add timestamp
-            timestamp = item.get("time") if isinstance(item, dict) else None
-            pdf.add_timestamp_link(timestamp, video_id, base_url)
-            
-            # 5. Restore margins
-            pdf.set_left_margin(initial_l_margin)
-            pdf.set_x(initial_l_margin)
-            pdf.ln(4)  # Space between items
-
-    # Output PDF
-    pdf.output(output)
-    if isinstance(output, BytesIO):
-        output.seek(0)
+            story.append(Paragraph(f"• {formatted_text}", styles['CustomBody']))
+        
+        # Add spacing between sections
+        story.append(Spacer(1, 0.15*inch if is_easy_read else 0.08*inch))
+    
+    # Build PDF
+    doc.build(story)
+    output.seek(0)
+    
+    print(f"\n✅ PDF generated successfully ({len(story)} elements)")
